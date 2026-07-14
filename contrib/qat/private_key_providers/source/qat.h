@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <optional>
 
 #include "envoy/api/api.h"
 #include "envoy/singleton/manager.h"
@@ -28,6 +29,8 @@ namespace PrivateKeyMethodProvider {
 namespace Qat {
 
 const int QAT_BUFFER_SIZE = 1024;
+
+enum class QatOperationResult { Success, Busy, Failure };
 
 /**
  * Represents a QAT hardware instance.
@@ -116,7 +119,8 @@ public:
   CpaStatus getOpStatus();
   int getFd();
   int getWriteFd();
-  bool decrypt(int len, const unsigned char* from, RSA* rsa, int padding);
+  QatOperationResult decrypt(int len, const unsigned char* from, RSA* rsa, int padding,
+                             std::optional<uint32_t> max_retry_count);
   void freeDecryptOpBuf(CpaCyRsaDecryptOpData* dec_op_data, CpaFlatBuffer* out_buf);
   void freeNuma(void* ptr);
 

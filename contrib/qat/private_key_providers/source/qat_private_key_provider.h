@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "envoy/api/api.h"
 #include "envoy/event/dispatcher.h"
 #include "envoy/ssl/private_key/private_key.h"
@@ -19,12 +21,24 @@ namespace Qat {
 class QatPrivateKeyConnection {
 public:
   QatPrivateKeyConnection(Ssl::PrivateKeyConnectionCallbacks& cb, Event::Dispatcher& dispatcher,
-                          QatHandle& handle, bssl::UniquePtr<EVP_PKEY> pkey);
+                          QatHandle& handle, bssl::UniquePtr<EVP_PKEY> pkey,
+                          Ssl::BoringSslPrivateKeyMethodSharedPtr fallback_method = nullptr,
+                          std::optional<uint32_t> max_retry_count = std::nullopt);
 
   void registerCallback(QatContext* ctx);
   void unregisterCallback();
   QatHandle& getHandle() { return handle_; };
   EVP_PKEY* getPrivateKey() { return pkey_.get(); };
+  const std::optional<uint32_t>& maxRetryCount() const { return max_retry_count_; }
+  bool usingFallback() const { return using_fallback_; }
+  void beginOperation() { using_fallback_ = false; }
+  ssl_private_key_result_t fallbackSign(SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out,
+                                        uint16_t signature_algorithm, const uint8_t* in,
+                                        size_t in_len);
+  ssl_private_key_result_t fallbackDecrypt(SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out,
+                                           const uint8_t* in, size_t in_len);
+  ssl_private_key_result_t fallbackComplete(SSL* ssl, uint8_t* out, size_t* out_len,
+                                            size_t max_out);
 
 private:
   Ssl::PrivateKeyConnectionCallbacks& cb_;
@@ -32,6 +46,9 @@ private:
   Event::FileEventPtr ssl_async_event_;
   QatHandle& handle_;
   bssl::UniquePtr<EVP_PKEY> pkey_;
+  Ssl::BoringSslPrivateKeyMethodSharedPtr fallback_method_;
+  const std::optional<uint32_t> max_retry_count_;
+  bool using_fallback_{false};
 };
 
 class QatPrivateKeyMethodProvider : public virtual Ssl::PrivateKeyMethodProvider,
@@ -57,6 +74,8 @@ private:
   Api::Api& api_;
   bssl::UniquePtr<EVP_PKEY> pkey_;
   LibQatCryptoSharedPtr libqat_;
+  Ssl::PrivateKeyMethodProviderSharedPtr fallback_provider_;
+  std::optional<uint32_t> max_retry_count_;
   bool initialized_{};
 };
 

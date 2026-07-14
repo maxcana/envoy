@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include "source/common/buffer/buffer_impl.h"
 #include "source/common/stats/isolated_store_impl.h"
 #include "source/extensions/compression/gzip/decompressor/zlib_decompressor_impl.h"
@@ -105,6 +107,51 @@ TEST_P(QatzipConfigTest, LoadConfigAndVerifyWithDecompressor) {
   EXPECT_EQ("qatzip.", qatzip_compressor_factory->statsPrefix());
 
   verifyWithDecompressor(qatzip_compressor_factory->createCompressor(), chunk_size);
+}
+
+TEST_F(QatzipCompressorImplTest, FallsBackWhileConcurrentOperationLimitIsReached) {
+  Envoy::Compression::Compressor::CompressorFactoryPtr compressor_factory =
+      createQatzipCompressorFactoryFromConfig(R"EOF({
+        "software_fallback": {
+          "max_concurrent_operations": 1,
+          "latency_threshold": "0.010s",
+          "cooldown": "1s"
+        }
+  })EOF");
+  auto* qatzip_factory = static_cast<QatzipCompressorFactory*>(compressor_factory.get());
+  QatzipFallbackState& fallback_state = qatzip_factory->fallbackStateForTest();
+  const MonotonicTime now = context_.server_factory_context_.timeSource().monotonicTime();
+  ASSERT_TRUE(fallback_state.tryAcquire(now));
+
+  verifyWithDecompressor(compressor_factory->createCompressor(), 4096);
+
+  fallback_state.release(now, now);
+}
+
+TEST_F(QatzipCompressorImplTest, UsesQatzipWhenAdmissionAllowsOperation) {
+  Envoy::Compression::Compressor::CompressorFactoryPtr compressor_factory =
+      createQatzipCompressorFactoryFromConfig(R"EOF({
+        "software_fallback": {
+          "max_concurrent_operations": 2,
+          "latency_threshold": "60s",
+          "cooldown": "1s"
+        }
+      })EOF");
+
+  verifyWithDecompressor(compressor_factory->createCompressor(), 4096);
+}
+
+TEST(QatzipFallbackStateTest, EnforcesLatencyCooldown) {
+  QatzipFallbackState fallback_state(1, std::chrono::milliseconds(10),
+                                     std::chrono::milliseconds(100));
+  const MonotonicTime start(std::chrono::milliseconds(1000));
+  ASSERT_TRUE(fallback_state.tryAcquire(start));
+  fallback_state.release(start, start + std::chrono::milliseconds(10));
+
+  EXPECT_FALSE(fallback_state.tryAcquire(start + std::chrono::milliseconds(50)));
+  EXPECT_TRUE(fallback_state.tryAcquire(start + std::chrono::milliseconds(110)));
+  fallback_state.release(start + std::chrono::milliseconds(110),
+                         start + std::chrono::milliseconds(111));
 }
 
 class InvalidQatzipConfigTest

@@ -42,6 +42,45 @@ public:
   bool is_completed_{false};
 };
 
+uint32_t& fallbackSignCalls() {
+  static uint32_t calls;
+  return calls;
+}
+
+uint32_t& fallbackDecryptCalls() {
+  static uint32_t calls;
+  return calls;
+}
+
+uint32_t& fallbackCompleteCalls() {
+  static uint32_t calls;
+  return calls;
+}
+
+ssl_private_key_result_t fallbackSign(SSL*, uint8_t*, size_t*, size_t, uint16_t, const uint8_t*,
+                                      size_t) {
+  fallbackSignCalls()++;
+  return ssl_private_key_retry;
+}
+
+ssl_private_key_result_t fallbackDecrypt(SSL*, uint8_t*, size_t*, size_t, const uint8_t*, size_t) {
+  fallbackDecryptCalls()++;
+  return ssl_private_key_retry;
+}
+
+ssl_private_key_result_t fallbackComplete(SSL*, uint8_t*, size_t*, size_t) {
+  fallbackCompleteCalls()++;
+  return ssl_private_key_success;
+}
+
+Ssl::BoringSslPrivateKeyMethodSharedPtr makeFallbackMethod() {
+  auto method = std::make_shared<SSL_PRIVATE_KEY_METHOD>();
+  method->sign = fallbackSign;
+  method->decrypt = fallbackDecrypt;
+  method->complete = fallbackComplete;
+  return method;
+}
+
 class FakeSingletonManager : public Singleton::Manager {
 public:
   FakeSingletonManager(LibQatCryptoSharedPtr libqat) : libqat_(libqat) {}
@@ -237,6 +276,45 @@ TEST_F(QatProviderRsaTest, TestRsaDecryption) {
   for (size_t i = 0; i < 128; i++) {
     EXPECT_EQ(in_buf[i], out_[i + 128]);
   }
+}
+
+TEST_F(QatProviderRsaTest, FallsBackSigningAfterRetryLimit) {
+  TestCallbacks cb;
+  QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_),
+                             makeFallbackMethod(), 2);
+  libqat_->cpaCyRsaDecrypt_return_value_ = CPA_STATUS_RETRY;
+  fallbackSignCalls() = 0;
+  fallbackCompleteCalls() = 0;
+
+  res_ = privateKeySignForTest(&op, nullptr, nullptr, max_out_len_, SSL_SIGN_RSA_PSS_SHA256, in_,
+                               in_len_);
+  EXPECT_EQ(ssl_private_key_retry, res_);
+  EXPECT_EQ(3, libqat_->cpaCyRsaDecrypt_call_count_);
+  EXPECT_EQ(1, fallbackSignCalls());
+
+  res_ = privateKeyCompleteForTest(&op, nullptr, out_, &out_len_, max_out_len_);
+  EXPECT_EQ(ssl_private_key_success, res_);
+  EXPECT_EQ(1, fallbackCompleteCalls());
+}
+
+TEST_F(QatProviderRsaTest, FallsBackDecryptionAfterRetryLimit) {
+  TestCallbacks cb;
+  QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_),
+                             makeFallbackMethod(), 1);
+  libqat_->cpaCyRsaDecrypt_return_value_ = CPA_STATUS_RETRY;
+  fallbackDecryptCalls() = 0;
+  fallbackCompleteCalls() = 0;
+  uint8_t encrypted[max_out_len_] = {0};
+
+  res_ = privateKeyDecryptForTest(&op, nullptr, nullptr, max_out_len_, encrypted,
+                                  max_out_len_);
+  EXPECT_EQ(ssl_private_key_retry, res_);
+  EXPECT_EQ(2, libqat_->cpaCyRsaDecrypt_call_count_);
+  EXPECT_EQ(1, fallbackDecryptCalls());
+
+  res_ = privateKeyCompleteForTest(&op, nullptr, out_, &out_len_, max_out_len_);
+  EXPECT_EQ(ssl_private_key_success, res_);
+  EXPECT_EQ(1, fallbackCompleteCalls());
 }
 
 TEST_F(QatProviderRsaTest, TestFailedSigning) {

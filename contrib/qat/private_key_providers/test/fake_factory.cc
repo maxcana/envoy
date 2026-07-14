@@ -134,6 +134,7 @@ CpaStatus FakeLibQatCryptoImpl::cpaCyRsaDecrypt(const CpaInstanceHandle instance
 
   RSA_free(rsa);
 
+  cpaCyRsaDecrypt_call_count_++;
   return cpaCyRsaDecrypt_return_value_;
 };
 

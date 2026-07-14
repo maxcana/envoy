@@ -49,6 +49,7 @@ public:
   CpaStatus cpaCyInstanceGetInfo2_return_value_{CPA_STATUS_SUCCESS};
   CpaStatus cpaCyStartInstance_return_value_{CPA_STATUS_SUCCESS};
   CpaStatus cpaCyRsaDecrypt_return_value_{CPA_STATUS_SUCCESS};
+  uint32_t cpaCyRsaDecrypt_call_count_{0};
 
   void resetReturnValues() {
     icpSalUserStart_return_value_ = CPA_STATUS_SUCCESS;
@@ -58,6 +59,7 @@ public:
     cpaCyInstanceGetInfo2_return_value_ = CPA_STATUS_SUCCESS;
     cpaCyStartInstance_return_value_ = CPA_STATUS_SUCCESS;
     cpaCyRsaDecrypt_return_value_ = CPA_STATUS_SUCCESS;
+    cpaCyRsaDecrypt_call_count_ = 0;
   }
 
 private:

@@ -1,5 +1,7 @@
 #include "contrib/qat/compression/qatzip/compressor/source/config.h"
 
+#include "source/extensions/compression/gzip/compressor/zlib_compressor_impl.h"
+
 namespace Envoy {
 namespace Extensions {
 namespace Compression {
@@ -14,6 +16,10 @@ const uint32_t DefaultChunkSize = 4096;
 
 // Default qatzip stream buffer size.
 const unsigned int DefaultStreamBufferSize = 128 * 1024;
+
+const uint32_t DefaultMaxConcurrentOperations = 1;
+const uint32_t DefaultLatencyThresholdMs = 10;
+const uint32_t DefaultCooldownMs = 1000;
 
 unsigned int hardwareBufferSizeEnum(
     envoy::extensions::compression::qatzip::compressor::v3alpha::Qatzip_HardwareBufferSize
@@ -59,13 +65,14 @@ unsigned int streamBufferSizeUint(Protobuf::uint32 stream_buffer_size) {
 QatzipCompressorFactory::QatzipCompressorFactory(
     const envoy::extensions::compression::qatzip::compressor::v3alpha::Qatzip& qatzip,
     Server::Configuration::GenericFactoryContext& context)
-    : chunk_size_(PROTOBUF_GET_WRAPPED_OR_DEFAULT(qatzip, chunk_size, DefaultChunkSize)),
+    : compression_level_(compressionLevelUint(qatzip.compression_level().value())),
+      chunk_size_(PROTOBUF_GET_WRAPPED_OR_DEFAULT(qatzip, chunk_size, DefaultChunkSize)),
       tls_slot_(context.serverFactoryContext().threadLocal().allocateSlot()) {
   QzSessionParams_T params;
 
   int status = qzGetDefaults(&params);
   RELEASE_ASSERT(status == QZ_OK, "failed to initialize hardware");
-  params.comp_lvl = compressionLevelUint(qatzip.compression_level().value());
+  params.comp_lvl = compression_level_;
   params.hw_buff_sz = hardwareBufferSizeEnum(qatzip.hardware_buffer_size());
   params.strm_buff_sz = streamBufferSizeUint(qatzip.stream_buffer_size().value());
   params.input_sz_thrshold = inputSizeThresholdUint(qatzip.input_size_threshold().value());
@@ -74,11 +81,34 @@ QatzipCompressorFactory::QatzipCompressorFactory(
   tls_slot_->set([params](Event::Dispatcher&) -> ThreadLocal::ThreadLocalObjectSharedPtr {
     return std::make_shared<QatzipThreadLocal>(params);
   });
+
+  if (qatzip.has_software_fallback()) {
+    const auto& fallback = qatzip.software_fallback();
+    fallback_state_ = std::make_shared<QatzipFallbackState>(
+        PROTOBUF_GET_WRAPPED_OR_DEFAULT(fallback, max_concurrent_operations,
+                                        DefaultMaxConcurrentOperations),
+        std::chrono::milliseconds(
+            PROTOBUF_GET_MS_OR_DEFAULT(fallback, latency_threshold, DefaultLatencyThresholdMs)),
+        std::chrono::milliseconds(
+            PROTOBUF_GET_MS_OR_DEFAULT(fallback, cooldown, DefaultCooldownMs)));
+    time_source_ = &context.serverFactoryContext().timeSource();
+  }
 }
 
 Envoy::Compression::Compressor::CompressorPtr QatzipCompressorFactory::createCompressor() {
+  if (fallback_state_ != nullptr) {
+    auto software_compressor =
+        std::make_unique<Compression::Gzip::Compressor::ZlibCompressorImpl>(chunk_size_);
+    software_compressor->init(
+        static_cast<Compression::Gzip::Compressor::ZlibCompressorImpl::CompressionLevel>(
+            compression_level_),
+        Compression::Gzip::Compressor::ZlibCompressorImpl::CompressionStrategy::Standard, 31, 5);
+    return std::make_unique<QatzipCompressorImpl>(
+        tls_slot_->getTyped<QatzipThreadLocal>().getSession(), chunk_size_,
+        std::move(software_compressor), fallback_state_, *time_source_);
+  }
   return std::make_unique<QatzipCompressorImpl>(
-      tls_slot_->getTyped<QatzipThreadLocal>().getSession());
+      tls_slot_->getTyped<QatzipThreadLocal>().getSession(), chunk_size_);
 }
 
 QatzipCompressorFactory::QatzipThreadLocal::QatzipThreadLocal(QzSessionParams_T params)

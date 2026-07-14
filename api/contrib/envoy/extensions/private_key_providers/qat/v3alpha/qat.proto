@@ -5,6 +5,7 @@ package envoy.extensions.private_key_providers.qat.v3alpha;
 import "envoy/config/core/v3/base.proto";
 
 import "google/protobuf/duration.proto";
+import "google/protobuf/wrappers.proto";
 
 import "udpa/annotations/sensitive.proto";
 import "udpa/annotations/status.proto";
@@ -23,7 +24,24 @@ option (udpa.annotations.file_status).package_version_status = ACTIVE;
 // The private key provider provides RSA sign and decrypt operation
 // hardware acceleration.
 
+// [#next-free-field: 4]
 message QatPrivateKeyMethodConfig {
+  message CryptoMbFallback {
+    // Number of times to retry submitting an operation after QAT reports that it is busy.
+    // After these retries are exhausted, the operation is submitted to CryptoMB.
+    //
+    // Defaults to ``3``.
+    google.protobuf.UInt32Value max_retry_count = 1
+        [(validate.rules).uint32 = {lte: 1000}];
+
+    // How long to wait until the CryptoMB per-thread processing queue should be processed.
+    // The duration needs to be set to a value greater than or equal to 1 millisecond.
+    google.protobuf.Duration poll_delay = 2 [(validate.rules).duration = {
+      required: true
+      gte {nanos: 1000000}
+    }];
+  }
+
   // Private key to use in the private key provider. If set to inline_bytes or
   // inline_string, the value needs to be the private key in PEM format.
   config.core.v3.DataSource private_key = 1 [(udpa.annotations.sensitive) = true];
@@ -37,4 +55,8 @@ message QatPrivateKeyMethodConfig {
     required: true
     gte {nanos: 1000000}
   }];
+
+  // If configured, operations that cannot be submitted to QAT after the configured number of
+  // retries are submitted to CryptoMB instead. The same private key is used by both providers.
+  CryptoMbFallback cryptomb_fallback = 3;
 }

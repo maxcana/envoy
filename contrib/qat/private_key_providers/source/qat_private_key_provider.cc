@@ -7,6 +7,9 @@
 
 #include "source/common/config/datasource.h"
 
+#include "contrib/cryptomb/private_key_providers/source/cryptomb_private_key_provider.h"
+#include "contrib/cryptomb/private_key_providers/source/ipp_crypto_impl.h"
+#include "contrib/envoy/extensions/private_key_providers/cryptomb/v3alpha/cryptomb.pb.h"
 #include "contrib/qat/private_key_providers/source/qat.h"
 #include "openssl/ssl.h"
 
@@ -50,8 +53,19 @@ void QatPrivateKeyConnection::unregisterCallback() { ssl_async_event_ = nullptr;
 
 namespace {
 
-ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnection* ops, uint8_t*,
-                                                size_t*, size_t, uint16_t signature_algorithm,
+void cleanupQatContext(SSL* ssl, QatPrivateKeyConnection* ops, QatContext* qat_ctx) {
+  if (ops != nullptr) {
+    ops->unregisterCallback();
+  }
+  if (ssl != nullptr && SSL_get_ex_data(ssl, QatManager::contextIndex()) == qat_ctx) {
+    SSL_set_ex_data(ssl, QatManager::contextIndex(), nullptr);
+  }
+  delete qat_ctx;
+}
+
+ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnection* ops,
+                                                uint8_t* out, size_t* out_len, size_t max_out,
+                                                uint16_t signature_algorithm,
                                                 const uint8_t* in, size_t in_len) {
   RSA* rsa;
   const EVP_MD* md;
@@ -67,6 +81,7 @@ ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnectio
   if (ops == nullptr) {
     return ssl_private_key_failure;
   }
+  ops->beginOperation();
 
   QatHandle& qat_handle = ops->getHandle();
 
@@ -134,7 +149,16 @@ ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnectio
   }
 
   // Start QAT decryption (signing) operation.
-  if (!qat_ctx->decrypt(msg_len, msg, rsa, padding)) {
+  const QatOperationResult result =
+      qat_ctx->decrypt(msg_len, msg, rsa, padding, ops->maxRetryCount());
+  if (result == QatOperationResult::Busy) {
+    if (prefix_allocated) {
+      OPENSSL_free(msg);
+    }
+    cleanupQatContext(ssl, ops, qat_ctx);
+    return ops->fallbackSign(ssl, out, out_len, max_out, signature_algorithm, in, in_len);
+  }
+  if (result == QatOperationResult::Failure) {
     goto error;
   }
 
@@ -148,7 +172,7 @@ error:
   if (prefix_allocated) {
     OPENSSL_free(msg);
   }
-  delete qat_ctx;
+  cleanupQatContext(ssl, ops, qat_ctx);
   return ssl_private_key_failure;
 }
 
@@ -163,15 +187,16 @@ ssl_private_key_result_t privateKeySign(SSL* ssl, uint8_t* out, size_t* out_len,
                                       out, out_len, max_out, signature_algorithm, in, in_len);
 }
 
-ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnection* ops, uint8_t*,
-                                                   size_t*, size_t, const uint8_t* in,
-                                                   size_t in_len) {
+ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnection* ops,
+                                                   uint8_t* out, size_t* out_len, size_t max_out,
+                                                   const uint8_t* in, size_t in_len) {
   RSA* rsa;
   QatContext* qat_ctx = nullptr;
 
   if (ops == nullptr) {
     return ssl_private_key_failure;
   }
+  ops->beginOperation();
 
   QatHandle& qat_handle = ops->getHandle();
   EVP_PKEY* rsa_pkey = ops->getPrivateKey();
@@ -203,14 +228,20 @@ ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnec
   }
 
   // Start QAT decryption (signing) operation.
-  if (!qat_ctx->decrypt(in_len, in, rsa, RSA_NO_PADDING)) {
+  const QatOperationResult result =
+      qat_ctx->decrypt(in_len, in, rsa, RSA_NO_PADDING, ops->maxRetryCount());
+  if (result == QatOperationResult::Busy) {
+    cleanupQatContext(ssl, ops, qat_ctx);
+    return ops->fallbackDecrypt(ssl, out, out_len, max_out, in, in_len);
+  }
+  if (result == QatOperationResult::Failure) {
     goto error;
   }
 
   return ssl_private_key_retry;
 
 error:
-  delete qat_ctx;
+  cleanupQatContext(ssl, ops, qat_ctx);
   return ssl_private_key_failure;
 }
 
@@ -227,6 +258,10 @@ ssl_private_key_result_t privateKeyDecrypt(SSL* ssl, uint8_t* out, size_t* out_l
 ssl_private_key_result_t privateKeyCompleteInternal(SSL* ssl, QatPrivateKeyConnection* ops,
                                                     QatContext* qat_ctx, uint8_t* out,
                                                     size_t* out_len, size_t max_out) {
+
+  if (ops != nullptr && ops->usingFallback()) {
+    return ops->fallbackComplete(ssl, out, out_len, max_out);
+  }
 
   if (qat_ctx == nullptr) {
     return ssl_private_key_failure;
@@ -315,8 +350,45 @@ bool QatPrivateKeyMethodProvider::isAvailable() { return initialized_; }
 
 QatPrivateKeyConnection::QatPrivateKeyConnection(Ssl::PrivateKeyConnectionCallbacks& cb,
                                                  Event::Dispatcher& dispatcher, QatHandle& handle,
-                                                 bssl::UniquePtr<EVP_PKEY> pkey)
-    : cb_(cb), dispatcher_(dispatcher), handle_(handle), pkey_(std::move(pkey)) {}
+                                                 bssl::UniquePtr<EVP_PKEY> pkey,
+                                                 Ssl::BoringSslPrivateKeyMethodSharedPtr
+                                                     fallback_method,
+                                                 std::optional<uint32_t> max_retry_count)
+    : cb_(cb), dispatcher_(dispatcher), handle_(handle), pkey_(std::move(pkey)),
+      fallback_method_(std::move(fallback_method)), max_retry_count_(max_retry_count) {}
+
+ssl_private_key_result_t QatPrivateKeyConnection::fallbackSign(
+    SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out, uint16_t signature_algorithm,
+    const uint8_t* in, size_t in_len) {
+  if (fallback_method_ == nullptr) {
+    return ssl_private_key_failure;
+  }
+  const ssl_private_key_result_t result =
+      fallback_method_->sign(ssl, out, out_len, max_out, signature_algorithm, in, in_len);
+  using_fallback_ = result == ssl_private_key_retry;
+  return result;
+}
+
+ssl_private_key_result_t QatPrivateKeyConnection::fallbackDecrypt(
+    SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out, const uint8_t* in, size_t in_len) {
+  if (fallback_method_ == nullptr) {
+    return ssl_private_key_failure;
+  }
+  const ssl_private_key_result_t result =
+      fallback_method_->decrypt(ssl, out, out_len, max_out, in, in_len);
+  using_fallback_ = result == ssl_private_key_retry;
+  return result;
+}
+
+ssl_private_key_result_t QatPrivateKeyConnection::fallbackComplete(SSL* ssl, uint8_t* out,
+                                                                   size_t* out_len,
+                                                                   size_t max_out) {
+  const ssl_private_key_result_t result = fallback_method_->complete(ssl, out, out_len, max_out);
+  if (result != ssl_private_key_retry) {
+    using_fallback_ = false;
+  }
+  return result;
+}
 
 void QatPrivateKeyMethodProvider::registerPrivateKeyMethod(SSL* ssl,
                                                            Ssl::PrivateKeyConnectionCallbacks& cb,
@@ -331,10 +403,16 @@ void QatPrivateKeyMethodProvider::registerPrivateKeyMethod(SSL* ssl,
         "Registering the QAT provider twice for same context is not yet supported.");
   }
 
+  if (fallback_provider_ != nullptr) {
+    fallback_provider_->registerPrivateKeyMethod(ssl, cb, dispatcher);
+  }
+
   QatHandle& handle = section_->getNextHandle();
 
-  QatPrivateKeyConnection* ops =
-      new QatPrivateKeyConnection(cb, dispatcher, handle, bssl::UpRef(pkey_));
+  QatPrivateKeyConnection* ops = new QatPrivateKeyConnection(
+      cb, dispatcher, handle, bssl::UpRef(pkey_),
+      fallback_provider_ != nullptr ? fallback_provider_->getBoringSslPrivateKeyMethod() : nullptr,
+      max_retry_count_);
   SSL_set_ex_data(ssl, QatManager::connectionIndex(), ops);
 }
 
@@ -343,6 +421,9 @@ void QatPrivateKeyMethodProvider::unregisterPrivateKeyMethod(SSL* ssl) {
       static_cast<QatPrivateKeyConnection*>(SSL_get_ex_data(ssl, QatManager::connectionIndex()));
   SSL_set_ex_data(ssl, QatManager::connectionIndex(), nullptr);
   delete ops;
+  if (fallback_provider_ != nullptr) {
+    fallback_provider_->unregisterPrivateKeyMethod(ssl);
+  }
 }
 
 QatPrivateKeyMethodProvider::QatPrivateKeyMethodProvider(
@@ -381,6 +462,23 @@ QatPrivateKeyMethodProvider::QatPrivateKeyMethodProvider(
     return;
   }
   pkey_ = std::move(pkey);
+
+  if (conf.has_cryptomb_fallback()) {
+    envoy::extensions::private_key_providers::cryptomb::v3alpha::CryptoMbPrivateKeyMethodConfig
+        fallback_config;
+    fallback_config.mutable_private_key()->CopyFrom(conf.private_key());
+    fallback_config.mutable_poll_delay()->CopyFrom(conf.cryptomb_fallback().poll_delay());
+    fallback_provider_ = std::make_shared<
+        ::Envoy::Extensions::PrivateKeyMethodProvider::CryptoMb::CryptoMbPrivateKeyMethodProvider>(
+        fallback_config, factory_context,
+        std::make_shared<
+            ::Envoy::Extensions::PrivateKeyMethodProvider::CryptoMb::IppCryptoImpl>());
+    if (!fallback_provider_->isAvailable()) {
+      throw EnvoyException("CryptoMB fallback isn't available.");
+    }
+    max_retry_count_ =
+        PROTOBUF_GET_WRAPPED_OR_DEFAULT(conf.cryptomb_fallback(), max_retry_count, 3);
+  }
 
   section_ = std::make_shared<QatSection>(libqat);
   if (!section_->startSection(api_, poll_delay)) {

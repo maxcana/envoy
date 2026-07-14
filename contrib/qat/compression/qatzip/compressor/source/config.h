@@ -44,6 +44,7 @@ public:
   const std::string& contentEncoding() const override {
     return Http::CustomHeaders::get().ContentEncodingValues.Gzip;
   }
+  QatzipFallbackState& fallbackStateForTest() { return *fallback_state_; }
 
 private:
   struct QatzipThreadLocal : public ThreadLocal::ThreadLocalObject {
@@ -56,7 +57,10 @@ private:
     bool initialized_{false};
   };
 
+  const uint32_t compression_level_;
   const uint32_t chunk_size_;
+  QatzipFallbackStateSharedPtr fallback_state_;
+  TimeSource* time_source_{nullptr};
   ThreadLocal::SlotPtr tls_slot_;
 };
 #endif

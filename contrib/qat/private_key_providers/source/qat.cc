@@ -402,23 +402,32 @@ bool QatContext::init() {
   return true;
 }
 
-bool QatContext::decrypt(int len, const unsigned char* from, RSA* rsa, int padding) {
+QatOperationResult QatContext::decrypt(int len, const unsigned char* from, RSA* rsa, int padding,
+                                       std::optional<uint32_t> max_retry_count) {
   CpaCyRsaDecryptOpData* op_data = nullptr;
   CpaFlatBuffer* out_buf = nullptr;
 
   // TODO(ipuustin): should this rather be a class function?
   int ret = buildDecryptOpBuf(len, from, rsa, padding, &op_data, &out_buf);
   if (!ret) {
-    return false;
+    return QatOperationResult::Failure;
   }
 
   CpaStatus status;
+  uint32_t retry_count = 0;
   do {
     status = getLibqat()->cpaCyRsaDecrypt(handle_.getHandle(), decryptCb, this, op_data, out_buf);
+    if (status == CPA_STATUS_RETRY && max_retry_count.has_value() &&
+        retry_count >= max_retry_count.value()) {
+      freeDecryptOpBuf(op_data, out_buf);
+      return QatOperationResult::Busy;
+    }
+    retry_count++;
   } while (status == CPA_STATUS_RETRY);
 
   if (status != CPA_STATUS_SUCCESS) {
-    return false;
+    freeDecryptOpBuf(op_data, out_buf);
+    return QatOperationResult::Failure;
   }
 
   {
@@ -428,7 +437,7 @@ bool QatContext::decrypt(int len, const unsigned char* from, RSA* rsa, int paddi
     handle_.qat_thread_cond_.notifyOne();
   }
 
-  return true;
+  return QatOperationResult::Success;
 }
 
 QatHandle& QatContext::getHandle() { return handle_; };

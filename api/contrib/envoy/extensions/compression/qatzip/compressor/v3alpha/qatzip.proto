@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package envoy.extensions.compression.qatzip.compressor.v3alpha;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/wrappers.proto";
 
 import "udpa/annotations/status.proto";
@@ -17,8 +18,30 @@ option (udpa.annotations.file_status).package_version_status = ACTIVE;
 // Qatzip :ref:`configuration overview <config_qatzip>`.
 // [#extension: envoy.compression.qatzip.compressor]
 
-// [#next-free-field: 6]
+// [#next-free-field: 7]
 message Qatzip {
+  message SoftwareFallback {
+    // Maximum number of concurrent QATzip calls across Envoy worker threads. A new compression
+    // stream uses the software fallback while this limit is reached.
+    //
+    // Defaults to ``1``.
+    google.protobuf.UInt32Value max_concurrent_operations = 1
+        [(validate.rules).uint32 = {lte: 1024 gte: 1}];
+
+    // QATzip call latency that marks the accelerator as busy. New compression streams use the
+    // software fallback for the configured cooldown after this threshold is reached.
+    //
+    // Defaults to 10 milliseconds.
+    google.protobuf.Duration latency_threshold = 2
+        [(validate.rules).duration = {gte {nanos: 1000000}}];
+
+    // How long new compression streams use the software fallback after a slow QATzip call.
+    //
+    // Defaults to 1 second.
+    google.protobuf.Duration cooldown = 3
+        [(validate.rules).duration = {gte {nanos: 1000000}}];
+  }
+
   enum HardwareBufferSize {
     DEFAULT = 0;
     SZ_4K = 1;
@@ -49,4 +72,9 @@ message Qatzip {
 
   // Value for compressor's next output buffer. If not set, defaults to 4096.
   google.protobuf.UInt32Value chunk_size = 5 [(validate.rules).uint32 = {lte: 65536 gte: 4096}];
+
+  // Enables admission control for QATzip. Streams rejected by admission control use Envoy's gzip
+  // compressor, which is backed by zlib-ng in standard Envoy builds. Once a stream has emitted
+  // output, it continues using its selected compressor for the remainder of the stream.
+  SoftwareFallback software_fallback = 6;
 }

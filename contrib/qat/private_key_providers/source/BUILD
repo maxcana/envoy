@@ -35,6 +35,8 @@ envoy_cc_library(
     external_deps = ["ssl"],
     deps = [
         ":libqat_wrapper_lib",
+        "//contrib/cryptomb/private_key_providers/source:cryptomb_private_key_provider_lib",
+        "//contrib/cryptomb/private_key_providers/source:ipp_crypto_wrapper_lib",
         "//envoy/api:api_interface",
         "//envoy/event:dispatcher_interface",
         "//envoy/registry",
@@ -44,6 +46,7 @@ envoy_cc_library(
         "//envoy/ssl/private_key:private_key_interface",
         "//source/common/common:thread_lib",
         "//source/common/config:datasource_lib",
+        "@envoy_api//contrib/envoy/extensions/private_key_providers/cryptomb/v3alpha:pkg_cc_proto",
         "@envoy_api//contrib/envoy/extensions/private_key_providers/qat/v3alpha:pkg_cc_proto",
     ],
 )
