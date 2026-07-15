@@ -76,6 +76,7 @@ ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnectio
   size_t msg_len;
   int prefix_allocated = 0;
   QatContext* qat_ctx = nullptr;
+  QatOperationResult result = QatOperationResult::Failure;
   int padding = RSA_NO_PADDING;
 
   if (ops == nullptr) {
@@ -149,8 +150,7 @@ ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnectio
   }
 
   // Start QAT decryption (signing) operation.
-  const QatOperationResult result =
-      qat_ctx->decrypt(msg_len, msg, rsa, padding, ops->maxRetryCount());
+  result = qat_ctx->decrypt(msg_len, msg, rsa, padding, ops->maxRetryCount());
   if (result == QatOperationResult::Busy) {
     if (prefix_allocated) {
       OPENSSL_free(msg);
@@ -192,6 +192,7 @@ ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnec
                                                    const uint8_t* in, size_t in_len) {
   RSA* rsa;
   QatContext* qat_ctx = nullptr;
+  QatOperationResult result = QatOperationResult::Failure;
 
   if (ops == nullptr) {
     return ssl_private_key_failure;
@@ -228,8 +229,7 @@ ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnec
   }
 
   // Start QAT decryption (signing) operation.
-  const QatOperationResult result =
-      qat_ctx->decrypt(in_len, in, rsa, RSA_NO_PADDING, ops->maxRetryCount());
+  result = qat_ctx->decrypt(in_len, in, rsa, RSA_NO_PADDING, ops->maxRetryCount());
   if (result == QatOperationResult::Busy) {
     cleanupQatContext(ssl, ops, qat_ctx);
     return ops->fallbackDecrypt(ssl, out, out_len, max_out, in, in_len);
