@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package envoy.extensions.compression.qatzip.compressor.v3alpha;
 
+import "google/protobuf/any.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/wrappers.proto";
 
@@ -40,6 +41,12 @@ message Qatzip {
     // Defaults to 1 second.
     google.protobuf.Duration cooldown = 3
         [(validate.rules).duration = {gte {nanos: 1000000}}];
+
+    // Gzip compressor configuration used by the software fallback. The typed configuration must
+    // contain an ``envoy.extensions.compression.gzip.compressor.v3.Gzip`` message. If unset, the
+    // fallback uses the QATzip compression level and chunk size with the gzip defaults for all
+    // other options.
+    google.protobuf.Any gzip = 4;
   }
 
   enum HardwareBufferSize {

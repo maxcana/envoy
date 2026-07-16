@@ -59,6 +59,7 @@ private:
 
   const uint32_t compression_level_;
   const uint32_t chunk_size_;
+  Envoy::Compression::Compressor::CompressorFactoryPtr software_compressor_factory_;
   QatzipFallbackStateSharedPtr fallback_state_;
   TimeSource* time_source_{nullptr};
   ThreadLocal::SlotPtr tls_slot_;

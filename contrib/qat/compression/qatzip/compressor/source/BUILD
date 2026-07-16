@@ -90,7 +90,8 @@ envoy_cc_contrib_extension(
         "//envoy/compression/compressor:compressor_config_interface",
         "//envoy/compression/compressor:compressor_factory_interface",
         "//source/common/http:headers_lib",
-        "//source/extensions/compression/gzip/compressor:compressor_lib",
+        "//source/common/protobuf:utility_lib",
+        "//source/extensions/compression/gzip/compressor:config",
         "@envoy_api//contrib/envoy/extensions/compression/qatzip/compressor/v3alpha:pkg_cc_proto",
     ] + select({
         "//bazel:linux_x86_64": [

@@ -115,7 +115,15 @@ TEST_F(QatzipCompressorImplTest, FallsBackWhileConcurrentOperationLimitIsReached
         "software_fallback": {
           "max_concurrent_operations": 1,
           "latency_threshold": "0.010s",
-          "cooldown": "1s"
+          "cooldown": "1s",
+          "gzip": {
+            "@type": "type.googleapis.com/envoy.extensions.compression.gzip.compressor.v3.Gzip",
+            "compression_level": "COMPRESSION_LEVEL_5",
+            "compression_strategy": "FILTERED",
+            "memory_level": 9,
+            "window_bits": 15,
+            "chunk_size": 16384
+          }
         }
   })EOF");
   auto* qatzip_factory = static_cast<QatzipCompressorFactory*>(compressor_factory.get());
@@ -126,6 +134,18 @@ TEST_F(QatzipCompressorImplTest, FallsBackWhileConcurrentOperationLimitIsReached
   verifyWithDecompressor(compressor_factory->createCompressor(), 4096);
 
   fallback_state.release(now, now);
+}
+
+TEST_F(QatzipCompressorImplTest, RejectsNonGzipSoftwareFallbackConfig) {
+  EXPECT_THROW_WITH_REGEX(
+      createQatzipCompressorFactoryFromConfig(R"EOF({
+        "software_fallback": {
+          "gzip": {
+            "@type": "type.googleapis.com/envoy.extensions.compression.qatzip.compressor.v3alpha.Qatzip"
+          }
+        }
+      })EOF"),
+      EnvoyException, "Unable to unpack");
 }
 
 TEST_F(QatzipCompressorImplTest, UsesQatzipWhenAdmissionAllowsOperation) {

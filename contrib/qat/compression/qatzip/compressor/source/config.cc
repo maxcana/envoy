@@ -1,6 +1,7 @@
 #include "contrib/qat/compression/qatzip/compressor/source/config.h"
 
-#include "source/extensions/compression/gzip/compressor/zlib_compressor_impl.h"
+#include "source/common/protobuf/utility.h"
+#include "source/extensions/compression/gzip/compressor/config.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -84,6 +85,19 @@ QatzipCompressorFactory::QatzipCompressorFactory(
 
   if (qatzip.has_software_fallback()) {
     const auto& fallback = qatzip.software_fallback();
+    envoy::extensions::compression::gzip::compressor::v3::Gzip gzip;
+    if (fallback.has_gzip()) {
+      MessageUtil::anyConvertAndValidate(fallback.gzip(), gzip,
+                                         context.messageValidationVisitor());
+    } else {
+      gzip.set_compression_level(
+          static_cast<envoy::extensions::compression::gzip::compressor::v3::Gzip::CompressionLevel>(
+              compression_level_));
+      gzip.mutable_window_bits()->set_value(15);
+      gzip.mutable_chunk_size()->set_value(chunk_size_);
+    }
+    software_compressor_factory_ =
+        std::make_unique<Compression::Gzip::Compressor::GzipCompressorFactory>(gzip);
     fallback_state_ = std::make_shared<QatzipFallbackState>(
         PROTOBUF_GET_WRAPPED_OR_DEFAULT(fallback, max_concurrent_operations,
                                         DefaultMaxConcurrentOperations),
@@ -97,15 +111,9 @@ QatzipCompressorFactory::QatzipCompressorFactory(
 
 Envoy::Compression::Compressor::CompressorPtr QatzipCompressorFactory::createCompressor() {
   if (fallback_state_ != nullptr) {
-    auto software_compressor =
-        std::make_unique<Compression::Gzip::Compressor::ZlibCompressorImpl>(chunk_size_);
-    software_compressor->init(
-        static_cast<Compression::Gzip::Compressor::ZlibCompressorImpl::CompressionLevel>(
-            compression_level_),
-        Compression::Gzip::Compressor::ZlibCompressorImpl::CompressionStrategy::Standard, 31, 5);
     return std::make_unique<QatzipCompressorImpl>(
         tls_slot_->getTyped<QatzipThreadLocal>().getSession(), chunk_size_,
-        std::move(software_compressor), fallback_state_, *time_source_);
+        software_compressor_factory_->createCompressor(), fallback_state_, *time_source_);
   }
   return std::make_unique<QatzipCompressorImpl>(
       tls_slot_->getTyped<QatzipThreadLocal>().getSession(), chunk_size_);
