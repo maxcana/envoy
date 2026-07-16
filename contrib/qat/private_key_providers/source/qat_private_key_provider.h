@@ -31,6 +31,9 @@ public:
   EVP_PKEY* getPrivateKey() { return pkey_.get(); };
   const std::optional<uint32_t>& maxRetryCount() const { return max_retry_count_; }
   bool usingFallback() const { return using_fallback_; }
+  bool fallbackCooldownActive() const {
+    return fallback_method_ != nullptr && handle_.isFallbackCooldownActive();
+  }
   void beginOperation() { using_fallback_ = false; }
   ssl_private_key_result_t fallbackSign(SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out,
                                         uint16_t signature_algorithm, const uint8_t* in,

@@ -27,10 +27,12 @@ option (udpa.annotations.file_status).package_version_status = ACTIVE;
 // [#next-free-field: 4]
 message QatPrivateKeyMethodConfig {
   message CryptoMbFallback {
-    // Number of times to retry submitting an operation after QAT reports that it is busy.
+    // Number of times to retry submitting an operation after QAT reports CPA_STATUS_RETRY.
     // After these retries are exhausted, the operation is submitted to CryptoMB.
+    // Note: CPA_STATUS_RETRY does not mean "QAT is busy".
+    // It is caused when the queue is full or maybe when an error or something happened.
     //
-    // Defaults to ``3``.
+    // Defaults to ``3``. Probably do not change this.
     google.protobuf.UInt32Value max_retry_count = 1
         [(validate.rules).uint32 = {lte: 1000}];
 
@@ -40,6 +42,23 @@ message QatPrivateKeyMethodConfig {
       required: true
       gte {nanos: 1000000}
     }];
+
+    // QAT operation latency that marks the selected QAT instance as busy. New private key
+    // operations assigned to that instance use CryptoMB for the configured cooldown after this
+    // threshold is reached. 
+    // Latency is measured from the initial QAT submission attempt until the
+    // completion callback is observed. Because completions are discovered by
+    // polling, the measurement includes time waiting for a polling cycle.
+    //
+    // Defaults to 5 milliseconds.
+    google.protobuf.Duration latency_threshold = 3
+        [(validate.rules).duration = {gte {nanos: 1000000}}];
+
+    // How long new private key operations use CryptoMB after a slow QAT operation.
+    //
+    // Defaults to 1 second.
+    google.protobuf.Duration cooldown = 4
+        [(validate.rules).duration = {gte {nanos: 1000000}}];
   }
 
   // Private key to use in the private key provider. If set to inline_bytes or
@@ -57,6 +76,7 @@ message QatPrivateKeyMethodConfig {
   }];
 
   // If configured, operations that cannot be submitted to QAT after the configured number of
-  // retries are submitted to CryptoMB instead. The same private key is used by both providers.
+  // retries, or are assigned to a QAT instance in latency cooldown, are submitted to CryptoMB
+  // instead. The same private key is used by both providers.
   CryptoMbFallback cryptomb_fallback = 3;
 }

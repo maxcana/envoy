@@ -1,9 +1,12 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <map>
 #include <optional>
 
 #include "envoy/api/api.h"
+#include "envoy/common/time.h"
 #include "envoy/singleton/manager.h"
 
 #include "source/common/common/lock_guard.h"
@@ -49,6 +52,12 @@ public:
   bool hasUsers();
   int getNodeAffinity();
   int isDone();
+  void configureFallbackLatency(TimeSource& time_source,
+                                std::chrono::milliseconds latency_threshold,
+                                std::chrono::milliseconds cooldown);
+  bool isFallbackCooldownActive() const;
+  std::optional<MonotonicTime> operationStartTime() const;
+  void operationComplete(const std::optional<MonotonicTime>& start_time);
 
   Thread::ThreadPtr polling_thread_;
   Thread::MutexBasicLockable poll_lock_{};
@@ -60,6 +69,10 @@ private:
   LibQatCryptoSharedPtr libqat_;
   int users_{};
   bool done_{};
+  TimeSource* time_source_{nullptr};
+  std::chrono::milliseconds latency_threshold_{};
+  std::chrono::milliseconds cooldown_{};
+  std::atomic<int64_t> cooldown_deadline_ns_{0};
 };
 
 /**
@@ -69,7 +82,9 @@ private:
 class QatSection : public Logger::Loggable<Logger::Id::connection> {
 public:
   QatSection(LibQatCryptoSharedPtr libqat);
-  bool startSection(Api::Api& api, std::chrono::milliseconds poll_delay);
+  bool startSection(Api::Api& api, std::chrono::milliseconds poll_delay,
+                    std::optional<std::chrono::milliseconds> latency_threshold = std::nullopt,
+                    std::optional<std::chrono::milliseconds> cooldown = std::nullopt);
   QatHandle& getNextHandle();
   bool isInitialized();
 
@@ -119,6 +134,7 @@ public:
   CpaStatus getOpStatus();
   int getFd();
   int getWriteFd();
+  void operationComplete();
   QatOperationResult decrypt(int len, const unsigned char* from, RSA* rsa, int padding,
                              std::optional<uint32_t> max_retry_count);
   void freeDecryptOpBuf(CpaCyRsaDecryptOpData* dec_op_data, CpaFlatBuffer* out_buf);
@@ -141,6 +157,7 @@ private:
   // Pipe for passing the message that the operation is completed.
   int read_fd_{-1};
   int write_fd_{-1};
+  std::optional<MonotonicTime> start_time_;
 };
 
 } // namespace Qat

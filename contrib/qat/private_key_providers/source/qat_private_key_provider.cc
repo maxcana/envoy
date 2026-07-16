@@ -20,6 +20,13 @@ namespace Qat {
 
 SINGLETON_MANAGER_REGISTRATION(qat_manager);
 
+namespace {
+
+const uint32_t DefaultFallbackLatencyThresholdMs = 5;
+const uint32_t DefaultFallbackCooldownMs = 1000;
+
+} // namespace
+
 void QatPrivateKeyConnection::registerCallback(QatContext* ctx) {
 
   // Get the receiving end of the notification pipe. The other end is written to by the polling
@@ -83,6 +90,10 @@ ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnectio
     return ssl_private_key_failure;
   }
   ops->beginOperation();
+
+  if (ops->fallbackCooldownActive()) {
+    return ops->fallbackSign(ssl, out, out_len, max_out, signature_algorithm, in, in_len);
+  }
 
   QatHandle& qat_handle = ops->getHandle();
 
@@ -198,6 +209,10 @@ ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnec
     return ssl_private_key_failure;
   }
   ops->beginOperation();
+
+  if (ops->fallbackCooldownActive()) {
+    return ops->fallbackDecrypt(ssl, out, out_len, max_out, in, in_len);
+  }
 
   QatHandle& qat_handle = ops->getHandle();
   EVP_PKEY* rsa_pkey = ops->getPrivateKey();
@@ -481,7 +496,15 @@ QatPrivateKeyMethodProvider::QatPrivateKeyMethodProvider(
   }
 
   section_ = std::make_shared<QatSection>(libqat);
-  if (!section_->startSection(api_, poll_delay)) {
+  std::optional<std::chrono::milliseconds> latency_threshold;
+  std::optional<std::chrono::milliseconds> cooldown;
+  if (conf.has_cryptomb_fallback()) {
+    latency_threshold = std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(
+        conf.cryptomb_fallback(), latency_threshold, DefaultFallbackLatencyThresholdMs));
+    cooldown = std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(
+        conf.cryptomb_fallback(), cooldown, DefaultFallbackCooldownMs));
+  }
+  if (!section_->startSection(api_, poll_delay, latency_threshold, cooldown)) {
     ENVOY_LOG(warn, "Failed to start QAT.");
     return;
   }

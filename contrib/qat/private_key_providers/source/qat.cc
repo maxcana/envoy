@@ -122,9 +122,56 @@ int QatHandle::getNodeAffinity() { return info_.nodeAffinity; }
 
 int QatHandle::isDone() { return done_; }
 
+void QatHandle::configureFallbackLatency(TimeSource& time_source,
+                                         std::chrono::milliseconds latency_threshold,
+                                         std::chrono::milliseconds cooldown) {
+  time_source_ = &time_source;
+  latency_threshold_ = latency_threshold;
+  cooldown_ = cooldown;
+}
+
+bool QatHandle::isFallbackCooldownActive() const {
+  if (time_source_ == nullptr) {
+    return false;
+  }
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             time_source_->monotonicTime().time_since_epoch())
+                             .count();
+  return now_ns < cooldown_deadline_ns_.load(std::memory_order_relaxed);
+}
+
+std::optional<MonotonicTime> QatHandle::operationStartTime() const {
+  if (time_source_ == nullptr) {
+    return std::nullopt;
+  }
+  return time_source_->monotonicTime();
+}
+
+void QatHandle::operationComplete(const std::optional<MonotonicTime>& start_time) {
+  if (time_source_ == nullptr || !start_time.has_value()) {
+    return;
+  }
+
+  const MonotonicTime end = time_source_->monotonicTime();
+  if (end - start_time.value() < latency_threshold_) {
+    return;
+  }
+
+  const int64_t new_deadline_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      (end + cooldown_).time_since_epoch())
+                                      .count();
+  int64_t deadline_ns = cooldown_deadline_ns_.load(std::memory_order_relaxed);
+  while (deadline_ns < new_deadline_ns &&
+         !cooldown_deadline_ns_.compare_exchange_weak(deadline_ns, new_deadline_ns,
+                                                      std::memory_order_relaxed)) {
+  }
+}
+
 QatSection::QatSection(LibQatCryptoSharedPtr libqat) : libqat_(libqat) {};
 
-bool QatSection::startSection(Api::Api& api, std::chrono::milliseconds poll_delay) {
+bool QatSection::startSection(Api::Api& api, std::chrono::milliseconds poll_delay,
+                              std::optional<std::chrono::milliseconds> latency_threshold,
+                              std::optional<std::chrono::milliseconds> cooldown) {
 
   // This function is called from a single-thread environment (server startup) to
   // initialize QAT for this particular section (or process name).
@@ -150,6 +197,11 @@ bool QatSection::startSection(Api::Api& api, std::chrono::milliseconds poll_dela
     if (!qat_handles_[i].initQatInstance(handles[i], libqat_)) {
       delete[] handles;
       return false;
+    }
+
+    if (latency_threshold.has_value() && cooldown.has_value()) {
+      qat_handles_[i].configureFallbackLatency(api.timeSource(), latency_threshold.value(),
+                                               cooldown.value());
     }
 
     // Every handle has a polling thread associated with it. This is needed
@@ -354,6 +406,7 @@ static void decryptCb(void* callback_tag, CpaStatus status, void* data, CpaFlatB
   QatHandle& handle = ctx->getHandle();
   {
     Thread::LockGuard poll_lock(handle.poll_lock_);
+    ctx->operationComplete();
     handle.removeUser();
   }
   {
@@ -415,6 +468,10 @@ QatOperationResult QatContext::decrypt(int len, const unsigned char* from, RSA* 
 
   CpaStatus status;
   uint32_t retry_count = 0;
+  {
+    Thread::LockGuard poll_lock(handle_.poll_lock_);
+    start_time_ = handle_.operationStartTime();
+  }
   do {
     status = getLibqat()->cpaCyRsaDecrypt(handle_.getHandle(), decryptCb, this, op_data, out_buf);
     if (status == CPA_STATUS_RETRY && max_retry_count.has_value() &&
@@ -465,6 +522,8 @@ bool QatContext::copyDecryptedData(unsigned char* bytes, int len) {
 int QatContext::getFd() { return read_fd_; }
 
 int QatContext::getWriteFd() { return write_fd_; };
+
+void QatContext::operationComplete() { handle_.operationComplete(start_time_); }
 
 } // namespace Qat
 } // namespace PrivateKeyMethodProvider
