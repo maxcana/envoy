@@ -10,54 +10,24 @@ namespace Compression {
 namespace Qatzip {
 namespace Compressor {
 
-QatzipFallbackState::QatzipFallbackState(uint32_t max_concurrent_operations,
-                                         std::chrono::milliseconds latency_threshold,
-                                         std::chrono::milliseconds cooldown)
-    : max_concurrent_operations_(max_concurrent_operations),
-      latency_threshold_(latency_threshold), cooldown_(cooldown) {}
-
-int64_t QatzipFallbackState::toNanoseconds(MonotonicTime time) {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
-}
-
-bool QatzipFallbackState::tryAcquire(MonotonicTime now) {
-  const int64_t now_ns = toNanoseconds(now);
-  if (now_ns < cooldown_deadline_ns_.load(std::memory_order_relaxed)) {
-    return false;
-  }
-
+bool QatzipOperationState::tryAcquire() {
   uint32_t active_operations = active_operations_.load(std::memory_order_relaxed);
-  while (active_operations < max_concurrent_operations_) {
+  while (active_operations < target_concurrent_operations_) {
     if (active_operations_.compare_exchange_weak(active_operations, active_operations + 1,
                                                  std::memory_order_relaxed)) {
-      if (now_ns < cooldown_deadline_ns_.load(std::memory_order_relaxed)) {
-        active_operations_.fetch_sub(1, std::memory_order_relaxed);
-        return false;
-      }
       return true;
     }
   }
   return false;
 }
 
-void QatzipFallbackState::acquire() {
+void QatzipOperationState::acquire() {
   active_operations_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void QatzipFallbackState::release(MonotonicTime start, MonotonicTime end) {
+void QatzipOperationState::release() {
   const uint32_t previous = active_operations_.fetch_sub(1, std::memory_order_relaxed);
   ASSERT(previous > 0);
-
-  if (end - start < latency_threshold_) {
-    return;
-  }
-
-  const int64_t new_deadline_ns = toNanoseconds(end + cooldown_);
-  int64_t deadline_ns = cooldown_deadline_ns_.load(std::memory_order_relaxed);
-  while (deadline_ns < new_deadline_ns &&
-         !cooldown_deadline_ns_.compare_exchange_weak(deadline_ns, new_deadline_ns,
-                                                      std::memory_order_relaxed)) {
-  }
 }
 
 QatzipCompressorImpl::QatzipCompressorImpl(QzSession_T* session)
@@ -75,12 +45,11 @@ QatzipCompressorImpl::QatzipCompressorImpl(QzSession_T* session, size_t chunk_si
 
 QatzipCompressorImpl::QatzipCompressorImpl(
     QzSession_T* session, size_t chunk_size,
-    Envoy::Compression::Compressor::CompressorPtr&& software_compressor,
-    QatzipFallbackStateSharedPtr fallback_state, TimeSource& time_source)
+    Envoy::Compression::Compressor::CompressorPtr&& gzip_compressor,
+    QatzipOperationStateSharedPtr operation_state)
     : chunk_size_{chunk_size}, avail_in_{0}, avail_out_{chunk_size - 10},
       chunk_char_ptr_(new unsigned char[chunk_size]), session_{session}, stream_{}, input_len_(0),
-      software_compressor_(std::move(software_compressor)),
-      fallback_state_(std::move(fallback_state)), time_source_(&time_source),
+      gzip_compressor_(std::move(gzip_compressor)), operation_state_(std::move(operation_state)),
       selection_(Selection::Undecided) {
   RELEASE_ASSERT(session_ != nullptr,
                  "QATzip compressor must be created with non-null QATzip session");
@@ -89,7 +58,7 @@ QatzipCompressorImpl::QatzipCompressorImpl(
 }
 
 QatzipCompressorImpl::~QatzipCompressorImpl() {
-  if (selection_ != Selection::Software) {
+  if (selection_ != Selection::Gzip) {
     qzEndStream(session_, &stream_);
   }
 }
@@ -97,8 +66,8 @@ QatzipCompressorImpl::~QatzipCompressorImpl() {
 void QatzipCompressorImpl::compress(Buffer::Instance& buffer,
                                     Envoy::Compression::Compressor::State state) {
 
-  if (selection_ == Selection::Software) {
-    software_compressor_->compress(buffer, state);
+  if (selection_ == Selection::Gzip) {
+    gzip_compressor_->compress(buffer, state);
     return;
   }
 
@@ -106,9 +75,9 @@ void QatzipCompressorImpl::compress(Buffer::Instance& buffer,
     if (buffer.length() == 0 && state != Envoy::Compression::Compressor::State::Finish) {
       return;
     }
-    if (!fallback_state_->tryAcquire(time_source_->monotonicTime())) {
-      selection_ = Selection::Software;
-      software_compressor_->compress(buffer, state);
+    if (!operation_state_->tryAcquire()) {
+      selection_ = Selection::Gzip;
+      gzip_compressor_->compress(buffer, state);
       return;
     }
     operation_reserved_ = true;
@@ -143,18 +112,16 @@ void QatzipCompressorImpl::compress(Buffer::Instance& buffer,
 void QatzipCompressorImpl::process(Buffer::Instance& output_buffer, unsigned int last) {
   stream_.in_sz = avail_in_;
   stream_.out_sz = avail_out_;
-  MonotonicTime start;
-  if (fallback_state_ != nullptr) {
-    start = time_source_->monotonicTime();
+  if (operation_state_ != nullptr) {
     if (operation_reserved_) {
       operation_reserved_ = false;
     } else {
-      fallback_state_->acquire();
+      operation_state_->acquire();
     }
   }
   auto status = qzCompressStream(session_, &stream_, last);
-  if (fallback_state_ != nullptr) {
-    fallback_state_->release(start, time_source_->monotonicTime());
+  if (operation_state_ != nullptr) {
+    operation_state_->release();
   }
   // NOTE: stream_.in_sz and stream_.out_sz have changed their semantics after the call
   //       to qzCompressStream(). Despite their name the new values are consumed input

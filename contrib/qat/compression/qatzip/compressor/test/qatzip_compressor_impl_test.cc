@@ -1,5 +1,3 @@
-#include <chrono>
-
 #include "source/common/buffer/buffer_impl.h"
 #include "source/common/stats/isolated_store_impl.h"
 #include "source/extensions/compression/gzip/decompressor/zlib_decompressor_impl.h"
@@ -109,13 +107,11 @@ TEST_P(QatzipConfigTest, LoadConfigAndVerifyWithDecompressor) {
   verifyWithDecompressor(qatzip_compressor_factory->createCompressor(), chunk_size);
 }
 
-TEST_F(QatzipCompressorImplTest, FallsBackWhileConcurrentOperationLimitIsReached) {
+TEST_F(QatzipCompressorImplTest, FallsBackToConfiguredGzipAtConcurrentOperationTarget) {
   Envoy::Compression::Compressor::CompressorFactoryPtr compressor_factory =
       createQatzipCompressorFactoryFromConfig(R"EOF({
-        "software_fallback": {
-          "max_concurrent_operations": 1,
-          "latency_threshold": "0.010s",
-          "cooldown": "1s",
+        "gzip_fallback": {
+          "target_concurrent_qzcompress_ops": 1,
           "gzip": {
             "@type": "type.googleapis.com/envoy.extensions.compression.gzip.compressor.v3.Gzip",
             "compression_level": "COMPRESSION_LEVEL_5",
@@ -127,19 +123,18 @@ TEST_F(QatzipCompressorImplTest, FallsBackWhileConcurrentOperationLimitIsReached
         }
   })EOF");
   auto* qatzip_factory = static_cast<QatzipCompressorFactory*>(compressor_factory.get());
-  QatzipFallbackState& fallback_state = qatzip_factory->fallbackStateForTest();
-  const MonotonicTime now = context_.server_factory_context_.timeSource().monotonicTime();
-  ASSERT_TRUE(fallback_state.tryAcquire(now));
+  QatzipOperationState& operation_state = qatzip_factory->operationStateForTest();
+  ASSERT_TRUE(operation_state.tryAcquire());
 
   verifyWithDecompressor(compressor_factory->createCompressor(), 4096);
 
-  fallback_state.release(now, now);
+  operation_state.release();
 }
 
-TEST_F(QatzipCompressorImplTest, RejectsNonGzipSoftwareFallbackConfig) {
+TEST_F(QatzipCompressorImplTest, RejectsNonGzipFallbackConfig) {
   EXPECT_THROW_WITH_REGEX(
       createQatzipCompressorFactoryFromConfig(R"EOF({
-        "software_fallback": {
+        "gzip_fallback": {
           "gzip": {
             "@type": "type.googleapis.com/envoy.extensions.compression.qatzip.compressor.v3alpha.Qatzip"
           }
@@ -151,27 +146,21 @@ TEST_F(QatzipCompressorImplTest, RejectsNonGzipSoftwareFallbackConfig) {
 TEST_F(QatzipCompressorImplTest, UsesQatzipWhenAdmissionAllowsOperation) {
   Envoy::Compression::Compressor::CompressorFactoryPtr compressor_factory =
       createQatzipCompressorFactoryFromConfig(R"EOF({
-        "software_fallback": {
-          "max_concurrent_operations": 2,
-          "latency_threshold": "60s",
-          "cooldown": "1s"
+        "gzip_fallback": {
+          "target_concurrent_qzcompress_ops": 2
         }
       })EOF");
 
   verifyWithDecompressor(compressor_factory->createCompressor(), 4096);
 }
 
-TEST(QatzipFallbackStateTest, EnforcesLatencyCooldown) {
-  QatzipFallbackState fallback_state(1, std::chrono::milliseconds(10),
-                                     std::chrono::milliseconds(100));
-  const MonotonicTime start(std::chrono::milliseconds(1000));
-  ASSERT_TRUE(fallback_state.tryAcquire(start));
-  fallback_state.release(start, start + std::chrono::milliseconds(10));
-
-  EXPECT_FALSE(fallback_state.tryAcquire(start + std::chrono::milliseconds(50)));
-  EXPECT_TRUE(fallback_state.tryAcquire(start + std::chrono::milliseconds(110)));
-  fallback_state.release(start + std::chrono::milliseconds(110),
-                         start + std::chrono::milliseconds(111));
+TEST(QatzipOperationStateTest, EnforcesConcurrentOperationTarget) {
+  QatzipOperationState operation_state(1);
+  ASSERT_TRUE(operation_state.tryAcquire());
+  EXPECT_FALSE(operation_state.tryAcquire());
+  operation_state.release();
+  EXPECT_TRUE(operation_state.tryAcquire());
+  operation_state.release();
 }
 
 class InvalidQatzipConfigTest

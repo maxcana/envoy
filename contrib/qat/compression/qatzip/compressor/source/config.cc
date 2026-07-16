@@ -18,9 +18,7 @@ const uint32_t DefaultChunkSize = 4096;
 // Default qatzip stream buffer size.
 const unsigned int DefaultStreamBufferSize = 128 * 1024;
 
-const uint32_t DefaultMaxConcurrentOperations = 1;
-const uint32_t DefaultLatencyThresholdMs = 10;
-const uint32_t DefaultCooldownMs = 1000;
+const uint32_t DefaultTargetConcurrentQzcompressOps = 64;
 
 unsigned int hardwareBufferSizeEnum(
     envoy::extensions::compression::qatzip::compressor::v3alpha::Qatzip_HardwareBufferSize
@@ -83,8 +81,8 @@ QatzipCompressorFactory::QatzipCompressorFactory(
     return std::make_shared<QatzipThreadLocal>(params);
   });
 
-  if (qatzip.has_software_fallback()) {
-    const auto& fallback = qatzip.software_fallback();
+  if (qatzip.has_gzip_fallback()) {
+    const auto& fallback = qatzip.gzip_fallback();
     envoy::extensions::compression::gzip::compressor::v3::Gzip gzip;
     if (fallback.has_gzip()) {
       MessageUtil::anyConvertAndValidate(fallback.gzip(), gzip,
@@ -96,24 +94,18 @@ QatzipCompressorFactory::QatzipCompressorFactory(
       gzip.mutable_window_bits()->set_value(15);
       gzip.mutable_chunk_size()->set_value(chunk_size_);
     }
-    software_compressor_factory_ =
+    gzip_compressor_factory_ =
         std::make_unique<Compression::Gzip::Compressor::GzipCompressorFactory>(gzip);
-    fallback_state_ = std::make_shared<QatzipFallbackState>(
-        PROTOBUF_GET_WRAPPED_OR_DEFAULT(fallback, max_concurrent_operations,
-                                        DefaultMaxConcurrentOperations),
-        std::chrono::milliseconds(
-            PROTOBUF_GET_MS_OR_DEFAULT(fallback, latency_threshold, DefaultLatencyThresholdMs)),
-        std::chrono::milliseconds(
-            PROTOBUF_GET_MS_OR_DEFAULT(fallback, cooldown, DefaultCooldownMs)));
-    time_source_ = &context.serverFactoryContext().timeSource();
+    operation_state_ = std::make_shared<QatzipOperationState>(PROTOBUF_GET_WRAPPED_OR_DEFAULT(
+        fallback, target_concurrent_qzcompress_ops, DefaultTargetConcurrentQzcompressOps));
   }
 }
 
 Envoy::Compression::Compressor::CompressorPtr QatzipCompressorFactory::createCompressor() {
-  if (fallback_state_ != nullptr) {
+  if (operation_state_ != nullptr) {
     return std::make_unique<QatzipCompressorImpl>(
         tls_slot_->getTyped<QatzipThreadLocal>().getSession(), chunk_size_,
-        software_compressor_factory_->createCompressor(), fallback_state_, *time_source_);
+        gzip_compressor_factory_->createCompressor(), operation_state_);
   }
   return std::make_unique<QatzipCompressorImpl>(
       tls_slot_->getTyped<QatzipThreadLocal>().getSession(), chunk_size_);

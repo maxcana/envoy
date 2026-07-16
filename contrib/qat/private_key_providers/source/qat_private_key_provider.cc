@@ -22,8 +22,7 @@ SINGLETON_MANAGER_REGISTRATION(qat_manager);
 
 namespace {
 
-const uint32_t DefaultFallbackLatencyThresholdMs = 5;
-const uint32_t DefaultFallbackCooldownMs = 1000;
+const uint32_t DefaultTargetConcurrentRsaOps = 128;
 
 } // namespace
 
@@ -91,12 +90,6 @@ ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnectio
   }
   ops->beginOperation();
 
-  if (ops->fallbackCooldownActive()) {
-    return ops->fallbackSign(ssl, out, out_len, max_out, signature_algorithm, in, in_len);
-  }
-
-  QatHandle& qat_handle = ops->getHandle();
-
   EVP_PKEY* rsa_pkey = ops->getPrivateKey();
 
   // Check if the SSL instance has correct data attached to it.
@@ -119,8 +112,11 @@ ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnectio
   }
 
   // Create QAT context which will be used for this particular signing/decryption.
-  qat_ctx = new QatContext(qat_handle);
-  if (qat_ctx == nullptr || !qat_ctx->init()) {
+  qat_ctx = ops->tryCreateQatContext();
+  if (qat_ctx == nullptr) {
+    return ops->fallbackSign(ssl, out, out_len, max_out, signature_algorithm, in, in_len);
+  }
+  if (!qat_ctx->init()) {
     goto error;
   }
 
@@ -161,7 +157,7 @@ ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnectio
   }
 
   // Start QAT decryption (signing) operation.
-  result = qat_ctx->decrypt(msg_len, msg, rsa, padding, ops->maxRetryCount());
+  result = qat_ctx->decrypt(msg_len, msg, rsa, padding);
   if (result == QatOperationResult::Busy) {
     if (prefix_allocated) {
       OPENSSL_free(msg);
@@ -210,11 +206,6 @@ ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnec
   }
   ops->beginOperation();
 
-  if (ops->fallbackCooldownActive()) {
-    return ops->fallbackDecrypt(ssl, out, out_len, max_out, in, in_len);
-  }
-
-  QatHandle& qat_handle = ops->getHandle();
   EVP_PKEY* rsa_pkey = ops->getPrivateKey();
 
   // Check if the SSL instance has correct data attached to it.
@@ -228,8 +219,11 @@ ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnec
   }
 
   // Create QAT context which will be used for this particular signing/decryption.
-  qat_ctx = new QatContext(qat_handle);
-  if (qat_ctx == nullptr || !qat_ctx->init()) {
+  qat_ctx = ops->tryCreateQatContext();
+  if (qat_ctx == nullptr) {
+    return ops->fallbackDecrypt(ssl, out, out_len, max_out, in, in_len);
+  }
+  if (!qat_ctx->init()) {
     goto error;
   }
 
@@ -244,7 +238,7 @@ ssl_private_key_result_t privateKeyDecryptInternal(SSL* ssl, QatPrivateKeyConnec
   }
 
   // Start QAT decryption (signing) operation.
-  result = qat_ctx->decrypt(in_len, in, rsa, RSA_NO_PADDING, ops->maxRetryCount());
+  result = qat_ctx->decrypt(in_len, in, rsa, RSA_NO_PADDING);
   if (result == QatOperationResult::Busy) {
     cleanupQatContext(ssl, ops, qat_ctx);
     return ops->fallbackDecrypt(ssl, out, out_len, max_out, in, in_len);
@@ -368,9 +362,16 @@ QatPrivateKeyConnection::QatPrivateKeyConnection(Ssl::PrivateKeyConnectionCallba
                                                  bssl::UniquePtr<EVP_PKEY> pkey,
                                                  Ssl::BoringSslPrivateKeyMethodSharedPtr
                                                      fallback_method,
-                                                 std::optional<uint32_t> max_retry_count)
+                                                 QatRsaOperationStateSharedPtr operation_state)
     : cb_(cb), dispatcher_(dispatcher), handle_(handle), pkey_(std::move(pkey)),
-      fallback_method_(std::move(fallback_method)), max_retry_count_(max_retry_count) {}
+      fallback_method_(std::move(fallback_method)), operation_state_(std::move(operation_state)) {}
+
+QatContext* QatPrivateKeyConnection::tryCreateQatContext() {
+  if (operation_state_ != nullptr && !operation_state_->tryAcquire()) {
+    return nullptr;
+  }
+  return new QatContext(handle_, operation_state_);
+}
 
 ssl_private_key_result_t QatPrivateKeyConnection::fallbackSign(
     SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out, uint16_t signature_algorithm,
@@ -427,7 +428,7 @@ void QatPrivateKeyMethodProvider::registerPrivateKeyMethod(SSL* ssl,
   QatPrivateKeyConnection* ops = new QatPrivateKeyConnection(
       cb, dispatcher, handle, bssl::UpRef(pkey_),
       fallback_provider_ != nullptr ? fallback_provider_->getBoringSslPrivateKeyMethod() : nullptr,
-      max_retry_count_);
+      operation_state_);
   SSL_set_ex_data(ssl, QatManager::connectionIndex(), ops);
 }
 
@@ -491,20 +492,12 @@ QatPrivateKeyMethodProvider::QatPrivateKeyMethodProvider(
     if (!fallback_provider_->isAvailable()) {
       throw EnvoyException("CryptoMB fallback isn't available.");
     }
-    max_retry_count_ =
-        PROTOBUF_GET_WRAPPED_OR_DEFAULT(conf.cryptomb_fallback(), max_retry_count, 3);
+    operation_state_ = std::make_shared<QatRsaOperationState>(PROTOBUF_GET_WRAPPED_OR_DEFAULT(
+        conf.cryptomb_fallback(), target_concurrent_rsa_ops, DefaultTargetConcurrentRsaOps));
   }
 
   section_ = std::make_shared<QatSection>(libqat);
-  std::optional<std::chrono::milliseconds> latency_threshold;
-  std::optional<std::chrono::milliseconds> cooldown;
-  if (conf.has_cryptomb_fallback()) {
-    latency_threshold = std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(
-        conf.cryptomb_fallback(), latency_threshold, DefaultFallbackLatencyThresholdMs));
-    cooldown = std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(
-        conf.cryptomb_fallback(), cooldown, DefaultFallbackCooldownMs));
-  }
-  if (!section_->startSection(api_, poll_delay, latency_threshold, cooldown)) {
+  if (!section_->startSection(api_, poll_delay)) {
     ENVOY_LOG(warn, "Failed to start QAT.");
     return;
   }

@@ -1,8 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 
-#include "envoy/common/time.h"
 #include "envoy/compression/compressor/compressor.h"
 
 #define HAVE_QAT_HEADERS
@@ -14,27 +14,21 @@ namespace Compression {
 namespace Qatzip {
 namespace Compressor {
 
-class QatzipFallbackState {
+class QatzipOperationState {
 public:
-  QatzipFallbackState(uint32_t max_concurrent_operations,
-                      std::chrono::milliseconds latency_threshold,
-                      std::chrono::milliseconds cooldown);
+  explicit QatzipOperationState(uint32_t target_concurrent_operations)
+      : target_concurrent_operations_(target_concurrent_operations) {}
 
-  bool tryAcquire(MonotonicTime now);
+  bool tryAcquire();
   void acquire();
-  void release(MonotonicTime start, MonotonicTime end);
+  void release();
 
 private:
-  static int64_t toNanoseconds(MonotonicTime time);
-
-  const uint32_t max_concurrent_operations_;
-  const std::chrono::milliseconds latency_threshold_;
-  const std::chrono::milliseconds cooldown_;
+  const uint32_t target_concurrent_operations_;
   std::atomic<uint32_t> active_operations_{0};
-  std::atomic<int64_t> cooldown_deadline_ns_{0};
 };
 
-using QatzipFallbackStateSharedPtr = std::shared_ptr<QatzipFallbackState>;
+using QatzipOperationStateSharedPtr = std::shared_ptr<QatzipOperationState>;
 
 /**
  * Implementation of compressor's interface.
@@ -52,15 +46,15 @@ public:
   QatzipCompressorImpl(QzSession_T* session, size_t chunk_size);
   QatzipCompressorImpl(
       QzSession_T* session, size_t chunk_size,
-      Envoy::Compression::Compressor::CompressorPtr&& software_compressor,
-      QatzipFallbackStateSharedPtr fallback_state, TimeSource& time_source);
+      Envoy::Compression::Compressor::CompressorPtr&& gzip_compressor,
+      QatzipOperationStateSharedPtr operation_state);
   ~QatzipCompressorImpl() override;
 
   // Compressor
   void compress(Buffer::Instance& buffer, Envoy::Compression::Compressor::State state) override;
 
 private:
-  enum class Selection { Undecided, Qatzip, Software };
+  enum class Selection { Undecided, Qatzip, Gzip };
 
   void process(Buffer::Instance& output_buffer, unsigned int last);
 
@@ -73,9 +67,8 @@ private:
   QzStream_T stream_;
 
   uint32_t input_len_;
-  Envoy::Compression::Compressor::CompressorPtr software_compressor_;
-  QatzipFallbackStateSharedPtr fallback_state_;
-  TimeSource* const time_source_{nullptr};
+  Envoy::Compression::Compressor::CompressorPtr gzip_compressor_;
+  QatzipOperationStateSharedPtr operation_state_;
   Selection selection_{Selection::Qatzip};
   bool operation_reserved_{false};
 };

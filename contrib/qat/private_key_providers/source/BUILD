@@ -38,7 +38,6 @@ envoy_cc_library(
         "//contrib/cryptomb/private_key_providers/source:cryptomb_private_key_provider_lib",
         "//contrib/cryptomb/private_key_providers/source:ipp_crypto_wrapper_lib",
         "//envoy/api:api_interface",
-        "//envoy/common:time_interface",
         "//envoy/event:dispatcher_interface",
         "//envoy/registry",
         "//envoy/server:transport_socket_config_interface",

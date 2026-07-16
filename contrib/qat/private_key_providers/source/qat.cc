@@ -9,6 +9,22 @@ namespace Extensions {
 namespace PrivateKeyMethodProvider {
 namespace Qat {
 
+bool QatRsaOperationState::tryAcquire() {
+  uint32_t active_operations = active_operations_.load(std::memory_order_relaxed);
+  while (active_operations < target_concurrent_operations_) {
+    if (active_operations_.compare_exchange_weak(active_operations, active_operations + 1,
+                                                 std::memory_order_relaxed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void QatRsaOperationState::release() {
+  const uint32_t previous = active_operations_.fetch_sub(1, std::memory_order_relaxed);
+  ASSERT(previous > 0);
+}
+
 QatManager::QatManager(LibQatCryptoSharedPtr libqat) {
   // Since we want to use VFs, it means that the section name doesn't
   // really matter but it needs to be a non-empty string. Use "SSL"
@@ -122,56 +138,9 @@ int QatHandle::getNodeAffinity() { return info_.nodeAffinity; }
 
 int QatHandle::isDone() { return done_; }
 
-void QatHandle::configureFallbackLatency(TimeSource& time_source,
-                                         std::chrono::milliseconds latency_threshold,
-                                         std::chrono::milliseconds cooldown) {
-  time_source_ = &time_source;
-  latency_threshold_ = latency_threshold;
-  cooldown_ = cooldown;
-}
-
-bool QatHandle::isFallbackCooldownActive() const {
-  if (time_source_ == nullptr) {
-    return false;
-  }
-  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             time_source_->monotonicTime().time_since_epoch())
-                             .count();
-  return now_ns < cooldown_deadline_ns_.load(std::memory_order_relaxed);
-}
-
-std::optional<MonotonicTime> QatHandle::operationStartTime() const {
-  if (time_source_ == nullptr) {
-    return std::nullopt;
-  }
-  return time_source_->monotonicTime();
-}
-
-void QatHandle::operationComplete(const std::optional<MonotonicTime>& start_time) {
-  if (time_source_ == nullptr || !start_time.has_value()) {
-    return;
-  }
-
-  const MonotonicTime end = time_source_->monotonicTime();
-  if (end - start_time.value() < latency_threshold_) {
-    return;
-  }
-
-  const int64_t new_deadline_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                      (end + cooldown_).time_since_epoch())
-                                      .count();
-  int64_t deadline_ns = cooldown_deadline_ns_.load(std::memory_order_relaxed);
-  while (deadline_ns < new_deadline_ns &&
-         !cooldown_deadline_ns_.compare_exchange_weak(deadline_ns, new_deadline_ns,
-                                                      std::memory_order_relaxed)) {
-  }
-}
-
 QatSection::QatSection(LibQatCryptoSharedPtr libqat) : libqat_(libqat) {};
 
-bool QatSection::startSection(Api::Api& api, std::chrono::milliseconds poll_delay,
-                              std::optional<std::chrono::milliseconds> latency_threshold,
-                              std::optional<std::chrono::milliseconds> cooldown) {
+bool QatSection::startSection(Api::Api& api, std::chrono::milliseconds poll_delay) {
 
   // This function is called from a single-thread environment (server startup) to
   // initialize QAT for this particular section (or process name).
@@ -197,11 +166,6 @@ bool QatSection::startSection(Api::Api& api, std::chrono::milliseconds poll_dela
     if (!qat_handles_[i].initQatInstance(handles[i], libqat_)) {
       delete[] handles;
       return false;
-    }
-
-    if (latency_threshold.has_value() && cooldown.has_value()) {
-      qat_handles_[i].configureFallbackLatency(api.timeSource(), latency_threshold.value(),
-                                               cooldown.value());
     }
 
     // Every handle has a polling thread associated with it. This is needed
@@ -406,7 +370,7 @@ static void decryptCb(void* callback_tag, CpaStatus status, void* data, CpaFlatB
   QatHandle& handle = ctx->getHandle();
   {
     Thread::LockGuard poll_lock(handle.poll_lock_);
-    ctx->operationComplete();
+    ctx->completeOperation();
     handle.removeUser();
   }
   {
@@ -427,9 +391,12 @@ static void decryptCb(void* callback_tag, CpaStatus status, void* data, CpaFlatB
 }
 } // namespace
 
-QatContext::QatContext(QatHandle& handle) : handle_(handle) {}
+QatContext::QatContext(QatHandle& handle, QatRsaOperationStateSharedPtr operation_state)
+    : handle_(handle), operation_state_(std::move(operation_state)),
+      operation_reserved_(operation_state_ != nullptr) {}
 
 QatContext::~QatContext() {
+  completeOperation();
   if (read_fd_ >= 0) {
     close(read_fd_);
   }
@@ -455,8 +422,7 @@ bool QatContext::init() {
   return true;
 }
 
-QatOperationResult QatContext::decrypt(int len, const unsigned char* from, RSA* rsa, int padding,
-                                       std::optional<uint32_t> max_retry_count) {
+QatOperationResult QatContext::decrypt(int len, const unsigned char* from, RSA* rsa, int padding) {
   CpaCyRsaDecryptOpData* op_data = nullptr;
   CpaFlatBuffer* out_buf = nullptr;
 
@@ -467,19 +433,12 @@ QatOperationResult QatContext::decrypt(int len, const unsigned char* from, RSA* 
   }
 
   CpaStatus status;
-  uint32_t retry_count = 0;
-  {
-    Thread::LockGuard poll_lock(handle_.poll_lock_);
-    start_time_ = handle_.operationStartTime();
-  }
   do {
     status = getLibqat()->cpaCyRsaDecrypt(handle_.getHandle(), decryptCb, this, op_data, out_buf);
-    if (status == CPA_STATUS_RETRY && max_retry_count.has_value() &&
-        retry_count >= max_retry_count.value()) {
+    if (status == CPA_STATUS_RETRY && operation_state_ != nullptr) {
       freeDecryptOpBuf(op_data, out_buf);
       return QatOperationResult::Busy;
     }
-    retry_count++;
   } while (status == CPA_STATUS_RETRY);
 
   if (status != CPA_STATUS_SUCCESS) {
@@ -523,7 +482,12 @@ int QatContext::getFd() { return read_fd_; }
 
 int QatContext::getWriteFd() { return write_fd_; };
 
-void QatContext::operationComplete() { handle_.operationComplete(start_time_); }
+void QatContext::completeOperation() {
+  if (operation_reserved_) {
+    operation_state_->release();
+    operation_reserved_ = false;
+  }
+}
 
 } // namespace Qat
 } // namespace PrivateKeyMethodProvider

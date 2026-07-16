@@ -2,11 +2,10 @@
 
 #include <atomic>
 #include <chrono>
-#include <map>
-#include <optional>
+#include <memory>
+#include <vector>
 
 #include "envoy/api/api.h"
-#include "envoy/common/time.h"
 #include "envoy/singleton/manager.h"
 
 #include "source/common/common/lock_guard.h"
@@ -35,6 +34,21 @@ const int QAT_BUFFER_SIZE = 1024;
 
 enum class QatOperationResult { Success, Busy, Failure };
 
+class QatRsaOperationState {
+public:
+  explicit QatRsaOperationState(uint32_t target_concurrent_operations)
+      : target_concurrent_operations_(target_concurrent_operations) {}
+
+  bool tryAcquire();
+  void release();
+
+private:
+  const uint32_t target_concurrent_operations_;
+  std::atomic<uint32_t> active_operations_{0};
+};
+
+using QatRsaOperationStateSharedPtr = std::shared_ptr<QatRsaOperationState>;
+
 /**
  * Represents a QAT hardware instance.
  */
@@ -52,12 +66,6 @@ public:
   bool hasUsers();
   int getNodeAffinity();
   int isDone();
-  void configureFallbackLatency(TimeSource& time_source,
-                                std::chrono::milliseconds latency_threshold,
-                                std::chrono::milliseconds cooldown);
-  bool isFallbackCooldownActive() const;
-  std::optional<MonotonicTime> operationStartTime() const;
-  void operationComplete(const std::optional<MonotonicTime>& start_time);
 
   Thread::ThreadPtr polling_thread_;
   Thread::MutexBasicLockable poll_lock_{};
@@ -69,10 +77,6 @@ private:
   LibQatCryptoSharedPtr libqat_;
   int users_{};
   bool done_{};
-  TimeSource* time_source_{nullptr};
-  std::chrono::milliseconds latency_threshold_{};
-  std::chrono::milliseconds cooldown_{};
-  std::atomic<int64_t> cooldown_deadline_ns_{0};
 };
 
 /**
@@ -82,9 +86,7 @@ private:
 class QatSection : public Logger::Loggable<Logger::Id::connection> {
 public:
   QatSection(LibQatCryptoSharedPtr libqat);
-  bool startSection(Api::Api& api, std::chrono::milliseconds poll_delay,
-                    std::optional<std::chrono::milliseconds> latency_threshold = std::nullopt,
-                    std::optional<std::chrono::milliseconds> cooldown = std::nullopt);
+  bool startSection(Api::Api& api, std::chrono::milliseconds poll_delay);
   QatHandle& getNextHandle();
   bool isInitialized();
 
@@ -123,7 +125,7 @@ private:
  */
 class QatContext {
 public:
-  QatContext(QatHandle& handle);
+  QatContext(QatHandle& handle, QatRsaOperationStateSharedPtr operation_state = nullptr);
   ~QatContext();
   bool init();
   QatHandle& getHandle();
@@ -134,9 +136,8 @@ public:
   CpaStatus getOpStatus();
   int getFd();
   int getWriteFd();
-  void operationComplete();
-  QatOperationResult decrypt(int len, const unsigned char* from, RSA* rsa, int padding,
-                             std::optional<uint32_t> max_retry_count);
+  void completeOperation();
+  QatOperationResult decrypt(int len, const unsigned char* from, RSA* rsa, int padding);
   void freeDecryptOpBuf(CpaCyRsaDecryptOpData* dec_op_data, CpaFlatBuffer* out_buf);
   void freeNuma(void* ptr);
 
@@ -157,7 +158,8 @@ private:
   // Pipe for passing the message that the operation is completed.
   int read_fd_{-1};
   int write_fd_{-1};
-  std::optional<MonotonicTime> start_time_;
+  QatRsaOperationStateSharedPtr operation_state_;
+  bool operation_reserved_{false};
 };
 
 } // namespace Qat

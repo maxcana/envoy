@@ -1,4 +1,3 @@
-#include <chrono>
 #include <memory>
 #include <set>
 #include <string>
@@ -279,51 +278,63 @@ TEST_F(QatProviderRsaTest, TestRsaDecryption) {
   }
 }
 
-TEST_F(QatProviderRsaTest, FallsBackSigningAfterRetryLimit) {
+TEST(QatRsaOperationStateTest, EnforcesConcurrentOperationTarget) {
+  QatRsaOperationState operation_state(1);
+  ASSERT_TRUE(operation_state.tryAcquire());
+  EXPECT_FALSE(operation_state.tryAcquire());
+  operation_state.release();
+  EXPECT_TRUE(operation_state.tryAcquire());
+  operation_state.release();
+}
+
+TEST_F(QatProviderRsaTest, FallsBackSigningAtConcurrentOperationTarget) {
   TestCallbacks cb;
-  QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_),
-                             makeFallbackMethod(), 2);
-  libqat_->cpaCyRsaDecrypt_return_value_ = CPA_STATUS_RETRY;
+  auto operation_state = std::make_shared<QatRsaOperationState>(1);
+  ASSERT_TRUE(operation_state->tryAcquire());
+  QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_), makeFallbackMethod(),
+                             operation_state);
   fallbackSignCalls() = 0;
   fallbackCompleteCalls() = 0;
 
   res_ = privateKeySignForTest(&op, nullptr, nullptr, max_out_len_, SSL_SIGN_RSA_PSS_SHA256, in_,
                                in_len_);
   EXPECT_EQ(ssl_private_key_retry, res_);
-  EXPECT_EQ(3, libqat_->cpaCyRsaDecrypt_call_count_);
+  EXPECT_EQ(0, libqat_->cpaCyRsaDecrypt_call_count_);
   EXPECT_EQ(1, fallbackSignCalls());
 
   res_ = privateKeyCompleteForTest(&op, nullptr, out_, &out_len_, max_out_len_);
   EXPECT_EQ(ssl_private_key_success, res_);
   EXPECT_EQ(1, fallbackCompleteCalls());
+  operation_state->release();
 }
 
-TEST_F(QatProviderRsaTest, FallsBackDecryptionAfterRetryLimit) {
+TEST_F(QatProviderRsaTest, FallsBackDecryptionAtConcurrentOperationTarget) {
   TestCallbacks cb;
-  QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_),
-                             makeFallbackMethod(), 1);
-  libqat_->cpaCyRsaDecrypt_return_value_ = CPA_STATUS_RETRY;
+  auto operation_state = std::make_shared<QatRsaOperationState>(1);
+  ASSERT_TRUE(operation_state->tryAcquire());
+  QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_), makeFallbackMethod(),
+                             operation_state);
   fallbackDecryptCalls() = 0;
   fallbackCompleteCalls() = 0;
   uint8_t encrypted[max_out_len_] = {0};
 
-  res_ = privateKeyDecryptForTest(&op, nullptr, nullptr, max_out_len_, encrypted,
-                                  max_out_len_);
+  res_ = privateKeyDecryptForTest(&op, nullptr, nullptr, max_out_len_, encrypted, max_out_len_);
   EXPECT_EQ(ssl_private_key_retry, res_);
-  EXPECT_EQ(2, libqat_->cpaCyRsaDecrypt_call_count_);
+  EXPECT_EQ(0, libqat_->cpaCyRsaDecrypt_call_count_);
   EXPECT_EQ(1, fallbackDecryptCalls());
 
   res_ = privateKeyCompleteForTest(&op, nullptr, out_, &out_len_, max_out_len_);
   EXPECT_EQ(ssl_private_key_success, res_);
   EXPECT_EQ(1, fallbackCompleteCalls());
+  operation_state->release();
 }
 
-TEST_F(QatProviderRsaTest, FallsBackDuringQatLatencyCooldown) {
+TEST_F(QatProviderRsaTest, FallsBackSigningWhenQatRejectsSubmission) {
   TestCallbacks cb;
-  handle_.configureFallbackLatency(time_system_, std::chrono::milliseconds(5),
-                                   std::chrono::seconds(1));
+  auto operation_state = std::make_shared<QatRsaOperationState>(1);
   QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_), makeFallbackMethod(),
-                             0);
+                             operation_state);
+  libqat_->cpaCyRsaDecrypt_return_value_ = CPA_STATUS_RETRY;
   fallbackSignCalls() = 0;
   fallbackCompleteCalls() = 0;
 
@@ -331,37 +342,13 @@ TEST_F(QatProviderRsaTest, FallsBackDuringQatLatencyCooldown) {
                                in_len_);
   EXPECT_EQ(ssl_private_key_retry, res_);
   EXPECT_EQ(1, libqat_->cpaCyRsaDecrypt_call_count_);
-
-  QatContext* ctx = static_cast<QatContext*>(libqat_->getQatContextPointer());
-  ASSERT_NE(nullptr, ctx);
-  time_system_.advanceTimeWait(std::chrono::milliseconds(5));
-  libqat_->triggerDecrypt();
-  dispatcher_->run(Event::Dispatcher::RunType::NonBlock);
-  EXPECT_EQ(ssl_private_key_success,
-            privateKeyCompleteForTest(&op, ctx, out_, &out_len_, max_out_len_));
-
-  res_ = privateKeySignForTest(&op, nullptr, nullptr, max_out_len_, SSL_SIGN_RSA_PSS_SHA256, in_,
-                               in_len_);
-  EXPECT_EQ(ssl_private_key_retry, res_);
   EXPECT_EQ(1, fallbackSignCalls());
-  EXPECT_EQ(1, libqat_->cpaCyRsaDecrypt_call_count_);
+
   EXPECT_EQ(ssl_private_key_success,
             privateKeyCompleteForTest(&op, nullptr, out_, &out_len_, max_out_len_));
   EXPECT_EQ(1, fallbackCompleteCalls());
-
-  time_system_.advanceTimeWait(std::chrono::seconds(1));
-  res_ = privateKeySignForTest(&op, nullptr, nullptr, max_out_len_, SSL_SIGN_RSA_PSS_SHA256, in_,
-                               in_len_);
-  EXPECT_EQ(ssl_private_key_retry, res_);
-  EXPECT_EQ(1, fallbackSignCalls());
-  EXPECT_EQ(2, libqat_->cpaCyRsaDecrypt_call_count_);
-
-  ctx = static_cast<QatContext*>(libqat_->getQatContextPointer());
-  ASSERT_NE(nullptr, ctx);
-  libqat_->triggerDecrypt();
-  dispatcher_->run(Event::Dispatcher::RunType::NonBlock);
-  EXPECT_EQ(ssl_private_key_success,
-            privateKeyCompleteForTest(&op, ctx, out_, &out_len_, max_out_len_));
+  EXPECT_TRUE(operation_state->tryAcquire());
+  operation_state->release();
 }
 
 TEST_F(QatProviderRsaTest, TestFailedSigning) {

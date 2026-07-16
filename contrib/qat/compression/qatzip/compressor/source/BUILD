@@ -69,7 +69,6 @@ envoy_cc_library(
     hdrs = ["qatzip_compressor_impl.h"],
     deps = [
         ":qatzip",
-        "//envoy/common:time_interface",
         "//envoy/compression/compressor:compressor_interface",
         "//source/common/common:assert_lib",
     ],
