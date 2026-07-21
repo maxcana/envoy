@@ -131,8 +131,8 @@ private:
     return true;
   }
 
-  const QzSessionParams_T params_;
-  const std::vector<uint8_t> input_;
+  QzSessionParams_T params_;
+  std::vector<uint8_t> input_;
   QzSession_T session_{};
   bool initialized_{false};
 };
