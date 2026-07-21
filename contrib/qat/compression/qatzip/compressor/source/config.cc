@@ -85,8 +85,7 @@ QatzipCompressorFactory::QatzipCompressorFactory(
     const auto& fallback = qatzip.gzip_fallback();
     envoy::extensions::compression::gzip::compressor::v3::Gzip gzip;
     if (fallback.has_gzip()) {
-      MessageUtil::anyConvertAndValidate(fallback.gzip(), gzip,
-                                         context.messageValidationVisitor());
+      MessageUtil::anyConvertAndValidate(fallback.gzip(), gzip, context.messageValidationVisitor());
     } else {
       gzip.set_compression_level(
           static_cast<envoy::extensions::compression::gzip::compressor::v3::Gzip::CompressionLevel>(

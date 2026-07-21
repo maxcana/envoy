@@ -44,10 +44,9 @@ public:
    * @param chunk_size amount of memory reserved for the compressor output.
    */
   QatzipCompressorImpl(QzSession_T* session, size_t chunk_size);
-  QatzipCompressorImpl(
-      QzSession_T* session, size_t chunk_size,
-      Envoy::Compression::Compressor::CompressorPtr&& gzip_compressor,
-      QatzipOperationStateSharedPtr operation_state);
+  QatzipCompressorImpl(QzSession_T* session, size_t chunk_size,
+                       Envoy::Compression::Compressor::CompressorPtr&& gzip_compressor,
+                       QatzipOperationStateSharedPtr operation_state);
   ~QatzipCompressorImpl() override;
 
   // Compressor

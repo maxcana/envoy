@@ -132,15 +132,14 @@ TEST_F(QatzipCompressorImplTest, FallsBackToConfiguredGzipAtConcurrentOperationT
 }
 
 TEST_F(QatzipCompressorImplTest, RejectsNonGzipFallbackConfig) {
-  EXPECT_THROW_WITH_REGEX(
-      createQatzipCompressorFactoryFromConfig(R"EOF({
+  EXPECT_THROW_WITH_REGEX(createQatzipCompressorFactoryFromConfig(R"EOF({
         "gzip_fallback": {
           "gzip": {
             "@type": "type.googleapis.com/envoy.extensions.compression.qatzip.compressor.v3alpha.Qatzip"
           }
         }
       })EOF"),
-      EnvoyException, "Unable to unpack");
+                          EnvoyException, "Unable to unpack");
 }
 
 TEST_F(QatzipCompressorImplTest, UsesQatzipWhenAdmissionAllowsOperation) {

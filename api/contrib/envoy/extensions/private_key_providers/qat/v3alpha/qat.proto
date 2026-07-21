@@ -38,8 +38,7 @@ message QatPrivateKeyMethodConfig {
     // private key operations use CryptoMB while this number of QAT operations is in flight.
     //
     // Defaults to ``128``.
-    google.protobuf.UInt32Value target_concurrent_rsa_ops = 2
-        [(validate.rules).uint32 = {gte: 1}];
+    google.protobuf.UInt32Value target_concurrent_rsa_ops = 2 [(validate.rules).uint32 = {gte: 1}];
   }
 
   // Private key to use in the private key provider. If set to inline_bytes or

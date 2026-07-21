@@ -71,8 +71,8 @@ void cleanupQatContext(SSL* ssl, QatPrivateKeyConnection* ops, QatContext* qat_c
 
 ssl_private_key_result_t privateKeySignInternal(SSL* ssl, QatPrivateKeyConnection* ops,
                                                 uint8_t* out, size_t* out_len, size_t max_out,
-                                                uint16_t signature_algorithm,
-                                                const uint8_t* in, size_t in_len) {
+                                                uint16_t signature_algorithm, const uint8_t* in,
+                                                size_t in_len) {
   RSA* rsa;
   const EVP_MD* md;
   bssl::ScopedEVP_MD_CTX ctx;
@@ -357,12 +357,10 @@ QatPrivateKeyMethodProvider::getBoringSslPrivateKeyMethod() {
 bool QatPrivateKeyMethodProvider::checkFips() { return false; }
 bool QatPrivateKeyMethodProvider::isAvailable() { return initialized_; }
 
-QatPrivateKeyConnection::QatPrivateKeyConnection(Ssl::PrivateKeyConnectionCallbacks& cb,
-                                                 Event::Dispatcher& dispatcher, QatHandle& handle,
-                                                 bssl::UniquePtr<EVP_PKEY> pkey,
-                                                 Ssl::BoringSslPrivateKeyMethodSharedPtr
-                                                     fallback_method,
-                                                 QatRsaOperationStateSharedPtr operation_state)
+QatPrivateKeyConnection::QatPrivateKeyConnection(
+    Ssl::PrivateKeyConnectionCallbacks& cb, Event::Dispatcher& dispatcher, QatHandle& handle,
+    bssl::UniquePtr<EVP_PKEY> pkey, Ssl::BoringSslPrivateKeyMethodSharedPtr fallback_method,
+    QatRsaOperationStateSharedPtr operation_state)
     : cb_(cb), dispatcher_(dispatcher), handle_(handle), pkey_(std::move(pkey)),
       fallback_method_(std::move(fallback_method)), operation_state_(std::move(operation_state)) {}
 
@@ -373,9 +371,10 @@ QatContext* QatPrivateKeyConnection::tryCreateQatContext() {
   return new QatContext(handle_, operation_state_);
 }
 
-ssl_private_key_result_t QatPrivateKeyConnection::fallbackSign(
-    SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out, uint16_t signature_algorithm,
-    const uint8_t* in, size_t in_len) {
+ssl_private_key_result_t QatPrivateKeyConnection::fallbackSign(SSL* ssl, uint8_t* out,
+                                                               size_t* out_len, size_t max_out,
+                                                               uint16_t signature_algorithm,
+                                                               const uint8_t* in, size_t in_len) {
   if (fallback_method_ == nullptr) {
     return ssl_private_key_failure;
   }
@@ -385,8 +384,10 @@ ssl_private_key_result_t QatPrivateKeyConnection::fallbackSign(
   return result;
 }
 
-ssl_private_key_result_t QatPrivateKeyConnection::fallbackDecrypt(
-    SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out, const uint8_t* in, size_t in_len) {
+ssl_private_key_result_t QatPrivateKeyConnection::fallbackDecrypt(SSL* ssl, uint8_t* out,
+                                                                  size_t* out_len, size_t max_out,
+                                                                  const uint8_t* in,
+                                                                  size_t in_len) {
   if (fallback_method_ == nullptr) {
     return ssl_private_key_failure;
   }
@@ -396,9 +397,8 @@ ssl_private_key_result_t QatPrivateKeyConnection::fallbackDecrypt(
   return result;
 }
 
-ssl_private_key_result_t QatPrivateKeyConnection::fallbackComplete(SSL* ssl, uint8_t* out,
-                                                                   size_t* out_len,
-                                                                   size_t max_out) {
+ssl_private_key_result_t
+QatPrivateKeyConnection::fallbackComplete(SSL* ssl, uint8_t* out, size_t* out_len, size_t max_out) {
   const ssl_private_key_result_t result = fallback_method_->complete(ssl, out, out_len, max_out);
   if (result != ssl_private_key_retry) {
     using_fallback_ = false;
@@ -487,8 +487,7 @@ QatPrivateKeyMethodProvider::QatPrivateKeyMethodProvider(
     fallback_provider_ = std::make_shared<
         ::Envoy::Extensions::PrivateKeyMethodProvider::CryptoMb::CryptoMbPrivateKeyMethodProvider>(
         fallback_config, factory_context,
-        std::make_shared<
-            ::Envoy::Extensions::PrivateKeyMethodProvider::CryptoMb::IppCryptoImpl>());
+        std::make_shared<::Envoy::Extensions::PrivateKeyMethodProvider::CryptoMb::IppCryptoImpl>());
     if (!fallback_provider_->isAvailable()) {
       throw EnvoyException("CryptoMB fallback isn't available.");
     }

@@ -21,9 +21,7 @@ bool QatzipOperationState::tryAcquire() {
   return false;
 }
 
-void QatzipOperationState::acquire() {
-  active_operations_.fetch_add(1, std::memory_order_relaxed);
-}
+void QatzipOperationState::acquire() { active_operations_.fetch_add(1, std::memory_order_relaxed); }
 
 void QatzipOperationState::release() {
   const uint32_t previous = active_operations_.fetch_sub(1, std::memory_order_relaxed);
