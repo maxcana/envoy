@@ -17,6 +17,7 @@ envoy_cc_library(
         "//envoy/thread:thread_interface",
         "//source/common/common:assert_lib",
         "//source/common/common:fmt_lib",
+        "//source/common/common:lock_guard_lib",
         "//source/common/common:logger_lib",
         "//source/common/common:thread_lib",
     ],
