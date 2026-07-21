@@ -69,6 +69,7 @@ envoy_cc_library(
     hdrs = ["qatzip_compressor_impl.h"],
     deps = [
         ":qatzip",
+        "//contrib/qat/common:canary_controller_lib",
         "//envoy/compression/compressor:compressor_interface",
         "//source/common/common:assert_lib",
     ],
@@ -86,8 +87,10 @@ envoy_cc_contrib_extension(
         ],
     }),
     deps = [
+        "//contrib/qat/common:canary_controller_lib",
         "//envoy/compression/compressor:compressor_config_interface",
         "//envoy/compression/compressor:compressor_factory_interface",
+        "//envoy/singleton:manager_interface",
         "//source/common/http:headers_lib",
         "//source/common/protobuf:utility_lib",
         "//source/extensions/compression/gzip/compressor:config",

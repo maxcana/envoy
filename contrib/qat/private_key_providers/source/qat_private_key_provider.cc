@@ -1,6 +1,10 @@
 #include "contrib/qat/private_key_providers/source/qat_private_key_provider.h"
 
+#include <chrono>
 #include <memory>
+#include <optional>
+#include <utility>
+#include <vector>
 
 #include "envoy/registry/registry.h"
 #include "envoy/server/transport_socket_config.h"
@@ -22,7 +26,63 @@ SINGLETON_MANAGER_REGISTRATION(qat_manager);
 
 namespace {
 
-const uint32_t DefaultTargetConcurrentRsaOps = 128;
+constexpr uint32_t DefaultStartupSamples = 30;
+constexpr uint64_t DefaultStartupSampleIntervalMs = 10;
+constexpr uint64_t DefaultCanaryPollIntervalMs = 1000;
+constexpr double DefaultProbabilityDecrease = 0.1;
+constexpr double DefaultProbabilityIncrease = 0.1;
+
+class TlsCanaryProbe {
+public:
+  TlsCanaryProbe(std::shared_ptr<QatSection> section, bssl::UniquePtr<EVP_PKEY> pkey)
+      : section_(std::move(section)), pkey_(std::move(pkey)) {}
+
+  std::optional<double> measure() {
+    RSA* rsa = EVP_PKEY_get0_RSA(pkey_.get());
+    if (rsa == nullptr) {
+      return std::nullopt;
+    }
+
+    std::vector<uint8_t> input(RSA_size(rsa), 0);
+    input.back() = 1;
+    QatContext context(section_->getNextHandle(), true);
+    if (!context.init()) {
+      return std::nullopt;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    if (context.decrypt(static_cast<int>(input.size()), input.data(), rsa, RSA_NO_PADDING) !=
+        QatOperationResult::Success) {
+      return std::nullopt;
+    }
+
+    CpaStatus status = CPA_STATUS_FAIL;
+    if (read(context.getFd(), &status, sizeof(status)) != sizeof(status) ||
+        status != CPA_STATUS_SUCCESS) {
+      return std::nullopt;
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    return std::chrono::duration<double, std::milli>(elapsed).count();
+  }
+
+private:
+  std::shared_ptr<QatSection> section_;
+  bssl::UniquePtr<EVP_PKEY> pkey_;
+};
+
+::Envoy::Extensions::Qat::CanaryControllerConfig canaryConfig(
+    const envoy::extensions::private_key_providers::qat::v3alpha::QatPrivateKeyMethodConfig::
+        CryptoMbFallback::Canary& canary) {
+  return {
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, startup_samples, DefaultStartupSamples),
+      std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(
+          canary, startup_sample_interval, DefaultStartupSampleIntervalMs)),
+      std::chrono::milliseconds(
+          PROTOBUF_GET_MS_OR_DEFAULT(canary, poll_interval, DefaultCanaryPollIntervalMs)),
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, probability_decrease, DefaultProbabilityDecrease),
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, probability_increase, DefaultProbabilityIncrease),
+  };
+}
 
 } // namespace
 
@@ -365,10 +425,10 @@ QatPrivateKeyConnection::QatPrivateKeyConnection(
       fallback_method_(std::move(fallback_method)), operation_state_(std::move(operation_state)) {}
 
 QatContext* QatPrivateKeyConnection::tryCreateQatContext() {
-  if (operation_state_ != nullptr && !operation_state_->tryAcquire()) {
+  if (operation_state_ != nullptr && !operation_state_->shouldUseQat()) {
     return nullptr;
   }
-  return new QatContext(handle_, operation_state_);
+  return new QatContext(handle_, fallback_method_ != nullptr);
 }
 
 ssl_private_key_result_t QatPrivateKeyConnection::fallbackSign(SSL* ssl, uint8_t* out,
@@ -491,14 +551,20 @@ QatPrivateKeyMethodProvider::QatPrivateKeyMethodProvider(
     if (!fallback_provider_->isAvailable()) {
       throw EnvoyException("CryptoMB fallback isn't available.");
     }
-    operation_state_ = std::make_shared<QatRsaOperationState>(PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-        conf.cryptomb_fallback(), target_concurrent_rsa_ops, DefaultTargetConcurrentRsaOps));
   }
 
   section_ = std::make_shared<QatSection>(libqat);
   if (!section_->startSection(api_, poll_delay)) {
     ENVOY_LOG(warn, "Failed to start QAT.");
     return;
+  }
+
+  if (conf.has_cryptomb_fallback() && conf.cryptomb_fallback().has_canary()) {
+    auto probe = std::make_shared<TlsCanaryProbe>(section_, bssl::UpRef(pkey_));
+    const auto canary_controller = manager_->getOrCreateCanaryController(
+        api_.threadFactory(), canaryConfig(conf.cryptomb_fallback().canary()),
+        [probe] { return probe->measure(); });
+    operation_state_ = std::make_shared<QatRsaOperationState>(canary_controller);
   }
 
   method_ = std::make_shared<SSL_PRIVATE_KEY_METHOD>();

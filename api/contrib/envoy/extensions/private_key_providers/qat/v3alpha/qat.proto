@@ -34,11 +34,39 @@ message QatPrivateKeyMethodConfig {
       gte {nanos: 1000000}
     }];
 
-    // Target number of concurrent RSA operations submitted to QAT across this provider. New
-    // private key operations use CryptoMB while this number of QAT operations is in flight.
-    //
-    // Defaults to ``128``.
-    google.protobuf.UInt32Value target_concurrent_rsa_ops = 2 [(validate.rules).uint32 = {gte: 1}];
+    message Canary {
+      // Canaries use the provider's private key and QAT polling delay.
+
+      // Number of fixed RSA operations used to establish the startup latency baseline.
+      // Defaults to ``30``.
+      google.protobuf.UInt32Value startup_samples = 1
+          [(validate.rules).uint32 = {lte: 1000 gte: 2}];
+
+      // Delay between startup samples. Defaults to ``0.01s``.
+      google.protobuf.Duration startup_sample_interval = 2 [(validate.rules).duration = {
+        lt {seconds: 60}
+        gte {nanos: 1000000}
+      }];
+
+      // Interval between runtime canaries. Defaults to ``1s``.
+      google.protobuf.Duration poll_interval = 3 [(validate.rules).duration = {
+        lt {seconds: 60}
+        gte {nanos: 1000000}
+      }];
+
+      // Amount subtracted from the QAT routing probability after a busy canary.
+      // Defaults to ``0.1``.
+      google.protobuf.DoubleValue probability_decrease = 4
+          [(validate.rules).double = {lte: 1.0 gt: 0.0}];
+
+      // Amount added to the QAT routing probability after a healthy canary.
+      // Defaults to ``0.1``.
+      google.protobuf.DoubleValue probability_increase = 5
+          [(validate.rules).double = {lte: 1.0 gt: 0.0}];
+    }
+
+    // Enables fixed-work RSA latency canaries and deterministic routing between QAT and CryptoMB.
+    Canary canary = 2;
   }
 
   // Private key to use in the private key provider. If set to inline_bytes or
@@ -55,7 +83,7 @@ message QatPrivateKeyMethodConfig {
     gte {nanos: 1000000}
   }];
 
-  // If configured, operations above the configured QAT concurrency target are submitted to
-  // CryptoMB instead. The same private key is used by both providers.
+  // If configured, operations rejected by canary admission or QAT submission are sent to CryptoMB.
+  // The same private key is used by both providers.
   CryptoMbFallback cryptomb_fallback = 3;
 }

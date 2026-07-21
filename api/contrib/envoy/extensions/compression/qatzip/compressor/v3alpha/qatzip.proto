@@ -3,6 +3,7 @@ syntax = "proto3";
 package envoy.extensions.compression.qatzip.compressor.v3alpha;
 
 import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
 import "google/protobuf/wrappers.proto";
 
 import "udpa/annotations/status.proto";
@@ -21,12 +22,46 @@ option (udpa.annotations.file_status).package_version_status = ACTIVE;
 // [#next-free-field: 7]
 message Qatzip {
   message GzipFallback {
-    // Target number of concurrent ``qzCompressStream`` calls across Envoy worker threads. A new
-    // compression stream uses gzip while this number of QATzip calls is active.
-    //
-    // Defaults to ``64``.
-    google.protobuf.UInt32Value target_concurrent_qzcompress_ops = 1
-        [(validate.rules).uint32 = {gte: 1}];
+    message Canary {
+      // Canaries use the enclosing QATzip compression level, hardware buffer size, stream buffer
+      // size, and input-size threshold.
+
+      // Number of fixed compression operations used to establish the startup latency baseline.
+      // Defaults to ``30``.
+      google.protobuf.UInt32Value startup_samples = 1
+          [(validate.rules).uint32 = {lte: 1000 gte: 2}];
+
+      // Delay between startup samples. Defaults to ``0.01s``.
+      google.protobuf.Duration startup_sample_interval = 2 [(validate.rules).duration = {
+        lt {seconds: 60}
+        gte {nanos: 1000000}
+      }];
+
+      // Interval between runtime canaries. Defaults to ``1s``.
+      google.protobuf.Duration poll_interval = 3 [(validate.rules).duration = {
+        lt {seconds: 60}
+        gte {nanos: 1000000}
+      }];
+
+      // Amount subtracted from the QAT routing probability after a busy canary.
+      // Defaults to ``0.1``.
+      google.protobuf.DoubleValue probability_decrease = 4
+          [(validate.rules).double = {lte: 1.0 gt: 0.0}];
+
+      // Amount added to the QAT routing probability after a healthy canary.
+      // Defaults to ``0.1``.
+      google.protobuf.DoubleValue probability_increase = 5
+          [(validate.rules).double = {lte: 1.0 gt: 0.0}];
+
+      // Size of the fixed deterministic canary input. The default is the larger of 64 KiB and the
+      // configured QATzip input-size threshold.
+      google.protobuf.UInt32Value input_size = 6
+          [(validate.rules).uint32 = {lte: 2097152 gte: 128}];
+    }
+
+    // Enables fixed-work compression latency canaries and deterministic routing between QATzip and
+    // gzip.
+    Canary canary = 1;
 
     // Gzip compressor configuration used by the fallback. The typed configuration must
     // contain an ``envoy.extensions.compression.gzip.compressor.v3.Gzip`` message. If unset, the
@@ -66,8 +101,8 @@ message Qatzip {
   // Value for compressor's next output buffer. If not set, defaults to 4096.
   google.protobuf.UInt32Value chunk_size = 5 [(validate.rules).uint32 = {lte: 65536 gte: 4096}];
 
-  // Enables admission control for QATzip. Streams rejected by admission control use Envoy's gzip
-  // compressor, which is backed by zlib-ng in standard Envoy builds. Once a stream has emitted
-  // output, it continues using its selected compressor for the remainder of the stream.
+  // Configures Envoy's gzip fallback, which is backed by zlib-ng in standard Envoy builds. When
+  // canaries are enabled, streams rejected by deterministic admission use gzip. Once a stream has
+  // emitted output, it continues using its selected compressor for the remainder of the stream.
   GzipFallback gzip_fallback = 6;
 }

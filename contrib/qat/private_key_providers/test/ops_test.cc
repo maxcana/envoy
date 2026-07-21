@@ -81,6 +81,20 @@ Ssl::BoringSslPrivateKeyMethodSharedPtr makeFallbackMethod() {
   return method;
 }
 
+struct TestOperationState {
+  explicit TestOperationState(double probability) {
+    ::Envoy::Extensions::Qat::CanaryControllerConfig config{
+        30, std::chrono::milliseconds(10), std::chrono::seconds(1), 0.1, 0.1};
+    controller =
+        std::make_shared<::Envoy::Extensions::Qat::CanaryController>("test", config);
+    controller->setProbabilityForTest(probability);
+    operation_state = std::make_shared<QatRsaOperationState>(controller);
+  }
+
+  ::Envoy::Extensions::Qat::CanaryControllerSharedPtr controller;
+  QatRsaOperationStateSharedPtr operation_state;
+};
+
 class FakeSingletonManager : public Singleton::Manager {
 public:
   FakeSingletonManager(LibQatCryptoSharedPtr libqat) : libqat_(libqat) {}
@@ -278,21 +292,11 @@ TEST_F(QatProviderRsaTest, TestRsaDecryption) {
   }
 }
 
-TEST(QatRsaOperationStateTest, EnforcesConcurrentOperationTarget) {
-  QatRsaOperationState operation_state(1);
-  ASSERT_TRUE(operation_state.tryAcquire());
-  EXPECT_FALSE(operation_state.tryAcquire());
-  operation_state.release();
-  EXPECT_TRUE(operation_state.tryAcquire());
-  operation_state.release();
-}
-
-TEST_F(QatProviderRsaTest, FallsBackSigningAtConcurrentOperationTarget) {
+TEST_F(QatProviderRsaTest, FallsBackSigningWhenProbabilityRejectsQat) {
   TestCallbacks cb;
-  auto operation_state = std::make_shared<QatRsaOperationState>(1);
-  ASSERT_TRUE(operation_state->tryAcquire());
+  TestOperationState operation_state(0);
   QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_), makeFallbackMethod(),
-                             operation_state);
+                             operation_state.operation_state);
   fallbackSignCalls() = 0;
   fallbackCompleteCalls() = 0;
 
@@ -305,15 +309,13 @@ TEST_F(QatProviderRsaTest, FallsBackSigningAtConcurrentOperationTarget) {
   res_ = privateKeyCompleteForTest(&op, nullptr, out_, &out_len_, max_out_len_);
   EXPECT_EQ(ssl_private_key_success, res_);
   EXPECT_EQ(1, fallbackCompleteCalls());
-  operation_state->release();
 }
 
-TEST_F(QatProviderRsaTest, FallsBackDecryptionAtConcurrentOperationTarget) {
+TEST_F(QatProviderRsaTest, FallsBackDecryptionWhenProbabilityRejectsQat) {
   TestCallbacks cb;
-  auto operation_state = std::make_shared<QatRsaOperationState>(1);
-  ASSERT_TRUE(operation_state->tryAcquire());
+  TestOperationState operation_state(0);
   QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_), makeFallbackMethod(),
-                             operation_state);
+                             operation_state.operation_state);
   fallbackDecryptCalls() = 0;
   fallbackCompleteCalls() = 0;
   uint8_t encrypted[max_out_len_] = {0};
@@ -326,14 +328,12 @@ TEST_F(QatProviderRsaTest, FallsBackDecryptionAtConcurrentOperationTarget) {
   res_ = privateKeyCompleteForTest(&op, nullptr, out_, &out_len_, max_out_len_);
   EXPECT_EQ(ssl_private_key_success, res_);
   EXPECT_EQ(1, fallbackCompleteCalls());
-  operation_state->release();
 }
 
 TEST_F(QatProviderRsaTest, FallsBackSigningWhenQatRejectsSubmission) {
   TestCallbacks cb;
-  auto operation_state = std::make_shared<QatRsaOperationState>(1);
   QatPrivateKeyConnection op(cb, *dispatcher_, handle_, bssl::UpRef(pkey_), makeFallbackMethod(),
-                             operation_state);
+                             nullptr);
   libqat_->cpaCyRsaDecrypt_return_value_ = CPA_STATUS_RETRY;
   fallbackSignCalls() = 0;
   fallbackCompleteCalls() = 0;
@@ -347,8 +347,6 @@ TEST_F(QatProviderRsaTest, FallsBackSigningWhenQatRejectsSubmission) {
   EXPECT_EQ(ssl_private_key_success,
             privateKeyCompleteForTest(&op, nullptr, out_, &out_len_, max_out_len_));
   EXPECT_EQ(1, fallbackCompleteCalls());
-  EXPECT_TRUE(operation_state->tryAcquire());
-  operation_state->release();
 }
 
 TEST_F(QatProviderRsaTest, TestFailedSigning) {

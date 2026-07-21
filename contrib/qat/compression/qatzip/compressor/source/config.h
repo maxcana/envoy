@@ -2,12 +2,14 @@
 
 #include "envoy/compression/compressor/config.h"
 #include "envoy/compression/compressor/factory.h"
+#include "envoy/singleton/manager.h"
 #include "envoy/thread_local/thread_local.h"
 
 #include "source/common/http/headers.h"
 
 #include "contrib/envoy/extensions/compression/qatzip/compressor/v3alpha/qatzip.pb.h"
 #include "contrib/envoy/extensions/compression/qatzip/compressor/v3alpha/qatzip.pb.validate.h"
+#include "contrib/qat/common/canary_controller.h"
 
 #ifndef QAT_DISABLED
 #include "contrib/qat/compression/qatzip/compressor/source/qatzip_compressor_impl.h"
@@ -32,6 +34,18 @@ const std::string& qatzipExtensionName() {
 } // namespace
 
 #ifndef QAT_DISABLED
+class QatzipCanaryManager : public Singleton::Instance {
+public:
+  ::Envoy::Extensions::Qat::CanaryControllerSharedPtr getOrCreate(
+      Thread::ThreadFactory& thread_factory,
+      ::Envoy::Extensions::Qat::CanaryControllerConfig config,
+      ::Envoy::Extensions::Qat::CanaryController::MeasureCallback measure_callback);
+
+private:
+  Thread::MutexBasicLockable lock_;
+  ::Envoy::Extensions::Qat::CanaryControllerSharedPtr controller_;
+};
+
 class QatzipCompressorFactory : public Envoy::Compression::Compressor::CompressorFactory {
 public:
   QatzipCompressorFactory(
@@ -44,7 +58,7 @@ public:
   const std::string& contentEncoding() const override {
     return Http::CustomHeaders::get().ContentEncodingValues.Gzip;
   }
-  QatzipOperationState& operationStateForTest() { return *operation_state_; }
+  void setQatProbabilityForTest(double probability);
 
 private:
   struct QatzipThreadLocal : public ThreadLocal::ThreadLocalObject {
@@ -60,8 +74,10 @@ private:
   const uint32_t compression_level_;
   const uint32_t chunk_size_;
   Envoy::Compression::Compressor::CompressorFactoryPtr gzip_compressor_factory_;
-  QatzipOperationStateSharedPtr operation_state_;
   ThreadLocal::SlotPtr tls_slot_;
+  std::shared_ptr<QatzipCanaryManager> canary_manager_;
+  ::Envoy::Extensions::Qat::CanaryControllerSharedPtr canary_controller_;
+  QatzipOperationStateSharedPtr operation_state_;
 };
 #endif
 

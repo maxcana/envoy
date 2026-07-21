@@ -37,6 +37,7 @@ envoy_cc_library(
         ":libqat_wrapper_lib",
         "//contrib/cryptomb/private_key_providers/source:cryptomb_private_key_provider_lib",
         "//contrib/cryptomb/private_key_providers/source:ipp_crypto_wrapper_lib",
+        "//contrib/qat/common:canary_controller_lib",
         "//envoy/api:api_interface",
         "//envoy/event:dispatcher_interface",
         "//envoy/registry",

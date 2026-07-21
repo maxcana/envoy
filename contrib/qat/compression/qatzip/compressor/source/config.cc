@@ -1,5 +1,11 @@
 #include "contrib/qat/compression/qatzip/compressor/source/config.h"
 
+#include <algorithm>
+#include <chrono>
+#include <optional>
+#include <utility>
+#include <vector>
+
 #include "source/common/protobuf/utility.h"
 #include "source/extensions/compression/gzip/compressor/config.h"
 
@@ -10,15 +16,22 @@ namespace Qatzip {
 namespace Compressor {
 
 #ifndef QAT_DISABLED
+SINGLETON_MANAGER_REGISTRATION(qatzip_canary_manager);
+
 namespace {
+
+constexpr uint32_t DefaultStartupSamples = 30;
+constexpr uint64_t DefaultStartupSampleIntervalMs = 10;
+constexpr uint64_t DefaultCanaryPollIntervalMs = 1000;
+constexpr uint32_t DefaultCanaryInputSize = 64 * 1024;
+constexpr double DefaultProbabilityDecrease = 0.1;
+constexpr double DefaultProbabilityIncrease = 0.1;
 
 // Default qatzip chunk size.
 const uint32_t DefaultChunkSize = 4096;
 
 // Default qatzip stream buffer size.
 const unsigned int DefaultStreamBufferSize = 128 * 1024;
-
-const uint32_t DefaultTargetConcurrentQzcompressOps = 64;
 
 unsigned int hardwareBufferSizeEnum(
     envoy::extensions::compression::qatzip::compressor::v3alpha::Qatzip_HardwareBufferSize
@@ -59,7 +72,99 @@ unsigned int streamBufferSizeUint(Protobuf::uint32 stream_buffer_size) {
   return stream_buffer_size > 0 ? stream_buffer_size : DefaultStreamBufferSize;
 }
 
+class QatzipCanaryProbe {
+public:
+  QatzipCanaryProbe(QzSessionParams_T params, uint32_t input_size)
+      : params_(params), input_(input_size) {
+    uint32_t state = 0x9e3779b9;
+    for (uint8_t& byte : input_) {
+      state ^= state << 13;
+      state ^= state >> 17;
+      state ^= state << 5;
+      byte = static_cast<uint8_t>(state);
+    }
+  }
+
+  ~QatzipCanaryProbe() {
+    if (initialized_) {
+      qzTeardownSession(&session_);
+      qzClose(&session_);
+    }
+  }
+
+  std::optional<double> measure() {
+    if (!initialize()) {
+      return std::nullopt;
+    }
+
+    unsigned int input_size = static_cast<unsigned int>(input_.size());
+    unsigned int output_size = qzMaxCompressedLength(input_size, &session_);
+    if (output_size == 0) {
+      return std::nullopt;
+    }
+    std::vector<uint8_t> output(output_size);
+    const auto start = std::chrono::steady_clock::now();
+    const int status =
+        qzCompress(&session_, input_.data(), &input_size, output.data(), &output_size, 1);
+    if (status != QZ_OK) {
+      return std::nullopt;
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    return std::chrono::duration<double, std::milli>(elapsed).count();
+  }
+
+private:
+  bool initialize() {
+    if (initialized_) {
+      return true;
+    }
+    int status = qzInit(&session_, params_.sw_backup);
+    if (status != QZ_OK && status != QZ_DUPLICATE) {
+      return false;
+    }
+    status = qzSetupSession(&session_, &params_);
+    if (status != QZ_OK && status != QZ_DUPLICATE) {
+      qzClose(&session_);
+      return false;
+    }
+    initialized_ = true;
+    return true;
+  }
+
+  const QzSessionParams_T params_;
+  const std::vector<uint8_t> input_;
+  QzSession_T session_{};
+  bool initialized_{false};
+};
+
+::Envoy::Extensions::Qat::CanaryControllerConfig canaryConfig(
+    const envoy::extensions::compression::qatzip::compressor::v3alpha::Qatzip::GzipFallback::
+        Canary& canary) {
+  return {
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, startup_samples, DefaultStartupSamples),
+      std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(
+          canary, startup_sample_interval, DefaultStartupSampleIntervalMs)),
+      std::chrono::milliseconds(
+          PROTOBUF_GET_MS_OR_DEFAULT(canary, poll_interval, DefaultCanaryPollIntervalMs)),
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, probability_decrease, DefaultProbabilityDecrease),
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, probability_increase, DefaultProbabilityIncrease),
+  };
+}
+
 } // namespace
+
+::Envoy::Extensions::Qat::CanaryControllerSharedPtr QatzipCanaryManager::getOrCreate(
+    Thread::ThreadFactory& thread_factory,
+    ::Envoy::Extensions::Qat::CanaryControllerConfig config,
+    ::Envoy::Extensions::Qat::CanaryController::MeasureCallback measure_callback) {
+  Thread::LockGuard lock(lock_);
+  if (controller_ == nullptr) {
+    controller_ =
+        std::make_shared<::Envoy::Extensions::Qat::CanaryController>("compression", config);
+    controller_->start(thread_factory, std::move(measure_callback));
+  }
+  return controller_;
+}
 
 QatzipCompressorFactory::QatzipCompressorFactory(
     const envoy::extensions::compression::qatzip::compressor::v3alpha::Qatzip& qatzip,
@@ -95,19 +200,48 @@ QatzipCompressorFactory::QatzipCompressorFactory(
     }
     gzip_compressor_factory_ =
         std::make_unique<Compression::Gzip::Compressor::GzipCompressorFactory>(gzip);
-    operation_state_ = std::make_shared<QatzipOperationState>(PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-        fallback, target_concurrent_qzcompress_ops, DefaultTargetConcurrentQzcompressOps));
+    if (fallback.has_canary()) {
+      const uint32_t canary_input_size = PROTOBUF_GET_WRAPPED_OR_DEFAULT(
+          fallback.canary(), input_size,
+          std::max(DefaultCanaryInputSize, static_cast<uint32_t>(params.input_sz_thrshold)));
+      if (canary_input_size < params.input_sz_thrshold) {
+        throw EnvoyException("QATzip canary input size must be at least input_size_threshold");
+      }
+      QzSessionParams_T canary_params = params;
+      canary_params.sw_backup = 0;
+      auto probe = std::make_shared<QatzipCanaryProbe>(canary_params, canary_input_size);
+      canary_manager_ = context.serverFactoryContext().singletonManager().getTyped<
+          QatzipCanaryManager>(SINGLETON_MANAGER_REGISTERED_NAME(qatzip_canary_manager),
+                               [] { return std::make_shared<QatzipCanaryManager>(); });
+      canary_controller_ = canary_manager_->getOrCreate(
+          context.serverFactoryContext().api().threadFactory(), canaryConfig(fallback.canary()),
+          [probe] { return probe->measure(); });
+      operation_state_ = std::make_shared<QatzipOperationState>(canary_controller_);
+    }
   }
 }
 
 Envoy::Compression::Compressor::CompressorPtr QatzipCompressorFactory::createCompressor() {
-  if (operation_state_ != nullptr) {
+  if (gzip_compressor_factory_ != nullptr) {
     return std::make_unique<QatzipCompressorImpl>(
         tls_slot_->getTyped<QatzipThreadLocal>().getSession(), chunk_size_,
         gzip_compressor_factory_->createCompressor(), operation_state_);
   }
   return std::make_unique<QatzipCompressorImpl>(
       tls_slot_->getTyped<QatzipThreadLocal>().getSession(), chunk_size_);
+}
+
+void QatzipCompressorFactory::setQatProbabilityForTest(double probability) {
+  if (canary_controller_ == nullptr) {
+    canary_controller_ = std::make_shared<::Envoy::Extensions::Qat::CanaryController>(
+        "test", ::Envoy::Extensions::Qat::CanaryControllerConfig{
+                    DefaultStartupSamples,
+                    std::chrono::milliseconds(DefaultStartupSampleIntervalMs),
+                    std::chrono::milliseconds(DefaultCanaryPollIntervalMs),
+                    DefaultProbabilityDecrease, DefaultProbabilityIncrease});
+    operation_state_ = std::make_shared<QatzipOperationState>(canary_controller_);
+  }
+  canary_controller_->setProbabilityForTest(probability);
 }
 
 QatzipCompressorFactory::QatzipThreadLocal::QatzipThreadLocal(QzSessionParams_T params)

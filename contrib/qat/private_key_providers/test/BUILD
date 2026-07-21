@@ -74,6 +74,7 @@ envoy_cc_test(
     rbe_pool = "6gig",
     deps = [
         ":test_fake_factory",
+        "//contrib/qat/common:canary_controller_lib",
         "//source/common/tls/private_key:private_key_manager_lib",
         "//test/mocks/server:server_mocks",
         "//test/test_common:environment_lib",

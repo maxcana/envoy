@@ -1,5 +1,7 @@
 #include "contrib/qat/private_key_providers/source/qat.h"
 
+#include <utility>
+
 #include "libqat.h"
 #include "openssl/rsa.h"
 #include "openssl/ssl.h"
@@ -8,22 +10,6 @@ namespace Envoy {
 namespace Extensions {
 namespace PrivateKeyMethodProvider {
 namespace Qat {
-
-bool QatRsaOperationState::tryAcquire() {
-  uint32_t active_operations = active_operations_.load(std::memory_order_relaxed);
-  while (active_operations < target_concurrent_operations_) {
-    if (active_operations_.compare_exchange_weak(active_operations, active_operations + 1,
-                                                 std::memory_order_relaxed)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-void QatRsaOperationState::release() {
-  const uint32_t previous = active_operations_.fetch_sub(1, std::memory_order_relaxed);
-  ASSERT(previous > 0);
-}
 
 QatManager::QatManager(LibQatCryptoSharedPtr libqat) {
   // Since we want to use VFs, it means that the section name doesn't
@@ -42,7 +28,21 @@ QatManager::~QatManager() {
   // The idea is that icp_sal_userStop() is called after the instances have been stopped and the
   // polling threads exited. Since QatManager is a singleton this is done only once.
 
+  canary_controller_.reset();
   libqat_->icpSalUserStop();
+}
+
+::Envoy::Extensions::Qat::CanaryControllerSharedPtr QatManager::getOrCreateCanaryController(
+    Thread::ThreadFactory& thread_factory,
+    ::Envoy::Extensions::Qat::CanaryControllerConfig config,
+    ::Envoy::Extensions::Qat::CanaryController::MeasureCallback measure_callback) {
+  Thread::LockGuard lock(canary_lock_);
+  if (canary_controller_ == nullptr) {
+    canary_controller_ =
+        std::make_shared<::Envoy::Extensions::Qat::CanaryController>("TLS", config);
+    canary_controller_->start(thread_factory, std::move(measure_callback));
+  }
+  return canary_controller_;
 }
 
 void QatManager::qatPoll(QatHandle& handle, std::chrono::milliseconds poll_delay) {
@@ -370,7 +370,6 @@ static void decryptCb(void* callback_tag, CpaStatus status, void* data, CpaFlatB
   QatHandle& handle = ctx->getHandle();
   {
     Thread::LockGuard poll_lock(handle.poll_lock_);
-    ctx->completeOperation();
     handle.removeUser();
   }
   {
@@ -391,12 +390,10 @@ static void decryptCb(void* callback_tag, CpaStatus status, void* data, CpaFlatB
 }
 } // namespace
 
-QatContext::QatContext(QatHandle& handle, QatRsaOperationStateSharedPtr operation_state)
-    : handle_(handle), operation_state_(std::move(operation_state)),
-      operation_reserved_(operation_state_ != nullptr) {}
+QatContext::QatContext(QatHandle& handle, bool return_on_retry)
+    : handle_(handle), return_on_retry_(return_on_retry) {}
 
 QatContext::~QatContext() {
-  completeOperation();
   if (read_fd_ >= 0) {
     close(read_fd_);
   }
@@ -435,7 +432,7 @@ QatOperationResult QatContext::decrypt(int len, const unsigned char* from, RSA* 
   CpaStatus status;
   do {
     status = getLibqat()->cpaCyRsaDecrypt(handle_.getHandle(), decryptCb, this, op_data, out_buf);
-    if (status == CPA_STATUS_RETRY && operation_state_ != nullptr) {
+    if (status == CPA_STATUS_RETRY && return_on_retry_) {
       freeDecryptOpBuf(op_data, out_buf);
       return QatOperationResult::Busy;
     }
@@ -481,13 +478,6 @@ bool QatContext::copyDecryptedData(unsigned char* bytes, int len) {
 int QatContext::getFd() { return read_fd_; }
 
 int QatContext::getWriteFd() { return write_fd_; };
-
-void QatContext::completeOperation() {
-  if (operation_reserved_) {
-    operation_state_->release();
-    operation_reserved_ = false;
-  }
-}
 
 } // namespace Qat
 } // namespace PrivateKeyMethodProvider

@@ -107,11 +107,10 @@ TEST_P(QatzipConfigTest, LoadConfigAndVerifyWithDecompressor) {
   verifyWithDecompressor(qatzip_compressor_factory->createCompressor(), chunk_size);
 }
 
-TEST_F(QatzipCompressorImplTest, FallsBackToConfiguredGzipAtConcurrentOperationTarget) {
+TEST_F(QatzipCompressorImplTest, FallsBackToConfiguredGzipWhenProbabilityRejectsQat) {
   Envoy::Compression::Compressor::CompressorFactoryPtr compressor_factory =
       createQatzipCompressorFactoryFromConfig(R"EOF({
         "gzip_fallback": {
-          "target_concurrent_qzcompress_ops": 1,
           "gzip": {
             "@type": "type.googleapis.com/envoy.extensions.compression.gzip.compressor.v3.Gzip",
             "compression_level": "COMPRESSION_LEVEL_5",
@@ -123,12 +122,9 @@ TEST_F(QatzipCompressorImplTest, FallsBackToConfiguredGzipAtConcurrentOperationT
         }
   })EOF");
   auto* qatzip_factory = static_cast<QatzipCompressorFactory*>(compressor_factory.get());
-  QatzipOperationState& operation_state = qatzip_factory->operationStateForTest();
-  ASSERT_TRUE(operation_state.tryAcquire());
+  qatzip_factory->setQatProbabilityForTest(0);
 
   verifyWithDecompressor(compressor_factory->createCompressor(), 4096);
-
-  operation_state.release();
 }
 
 TEST_F(QatzipCompressorImplTest, RejectsNonGzipFallbackConfig) {
@@ -142,24 +138,14 @@ TEST_F(QatzipCompressorImplTest, RejectsNonGzipFallbackConfig) {
                           EnvoyException, "Unable to unpack");
 }
 
-TEST_F(QatzipCompressorImplTest, UsesQatzipWhenAdmissionAllowsOperation) {
+TEST_F(QatzipCompressorImplTest, UsesQatzipWhenCanaryIsDisabled) {
   Envoy::Compression::Compressor::CompressorFactoryPtr compressor_factory =
       createQatzipCompressorFactoryFromConfig(R"EOF({
         "gzip_fallback": {
-          "target_concurrent_qzcompress_ops": 2
         }
       })EOF");
 
   verifyWithDecompressor(compressor_factory->createCompressor(), 4096);
-}
-
-TEST(QatzipOperationStateTest, EnforcesConcurrentOperationTarget) {
-  QatzipOperationState operation_state(1);
-  ASSERT_TRUE(operation_state.tryAcquire());
-  EXPECT_FALSE(operation_state.tryAcquire());
-  operation_state.release();
-  EXPECT_TRUE(operation_state.tryAcquire());
-  operation_state.release();
 }
 
 class InvalidQatzipConfigTest

@@ -8,6 +8,7 @@
 #include "source/common/common/logger.h"
 
 #include "contrib/envoy/extensions/private_key_providers/qat/v3alpha/qat.pb.h"
+#include "contrib/qat/common/canary_controller.h"
 #include "contrib/qat/private_key_providers/source/libqat.h"
 #include "contrib/qat/private_key_providers/source/qat.h"
 

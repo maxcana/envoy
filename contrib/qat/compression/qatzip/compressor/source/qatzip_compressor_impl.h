@@ -1,9 +1,10 @@
 #pragma once
 
-#include <atomic>
 #include <memory>
 
 #include "envoy/compression/compressor/compressor.h"
+
+#include "contrib/qat/common/canary_controller.h"
 
 #define HAVE_QAT_HEADERS
 #include "qatzip.h"
@@ -16,16 +17,17 @@ namespace Compressor {
 
 class QatzipOperationState {
 public:
-  explicit QatzipOperationState(uint32_t target_concurrent_operations)
-      : target_concurrent_operations_(target_concurrent_operations) {}
+  explicit QatzipOperationState(
+      const ::Envoy::Extensions::Qat::CanaryControllerSharedPtr& controller)
+      : controller_(controller) {}
 
-  bool tryAcquire();
-  void acquire();
-  void release();
+  bool shouldUseQat() {
+    const auto controller = controller_.lock();
+    return controller != nullptr && controller->shouldUseQat();
+  }
 
 private:
-  const uint32_t target_concurrent_operations_;
-  std::atomic<uint32_t> active_operations_{0};
+  std::weak_ptr<::Envoy::Extensions::Qat::CanaryController> controller_;
 };
 
 using QatzipOperationStateSharedPtr = std::shared_ptr<QatzipOperationState>;
@@ -69,7 +71,6 @@ private:
   Envoy::Compression::Compressor::CompressorPtr gzip_compressor_;
   QatzipOperationStateSharedPtr operation_state_;
   Selection selection_{Selection::Qatzip};
-  bool operation_reserved_{false};
 };
 
 } // namespace Compressor

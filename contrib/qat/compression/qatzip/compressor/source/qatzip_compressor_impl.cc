@@ -10,24 +10,6 @@ namespace Compression {
 namespace Qatzip {
 namespace Compressor {
 
-bool QatzipOperationState::tryAcquire() {
-  uint32_t active_operations = active_operations_.load(std::memory_order_relaxed);
-  while (active_operations < target_concurrent_operations_) {
-    if (active_operations_.compare_exchange_weak(active_operations, active_operations + 1,
-                                                 std::memory_order_relaxed)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-void QatzipOperationState::acquire() { active_operations_.fetch_add(1, std::memory_order_relaxed); }
-
-void QatzipOperationState::release() {
-  const uint32_t previous = active_operations_.fetch_sub(1, std::memory_order_relaxed);
-  ASSERT(previous > 0);
-}
-
 QatzipCompressorImpl::QatzipCompressorImpl(QzSession_T* session)
     : QatzipCompressorImpl(session, 4096) {}
 
@@ -73,12 +55,11 @@ void QatzipCompressorImpl::compress(Buffer::Instance& buffer,
     if (buffer.length() == 0 && state != Envoy::Compression::Compressor::State::Finish) {
       return;
     }
-    if (!operation_state_->tryAcquire()) {
+    if (operation_state_ != nullptr && !operation_state_->shouldUseQat()) {
       selection_ = Selection::Gzip;
       gzip_compressor_->compress(buffer, state);
       return;
     }
-    operation_reserved_ = true;
     selection_ = Selection::Qatzip;
   }
 
@@ -110,17 +91,7 @@ void QatzipCompressorImpl::compress(Buffer::Instance& buffer,
 void QatzipCompressorImpl::process(Buffer::Instance& output_buffer, unsigned int last) {
   stream_.in_sz = avail_in_;
   stream_.out_sz = avail_out_;
-  if (operation_state_ != nullptr) {
-    if (operation_reserved_) {
-      operation_reserved_ = false;
-    } else {
-      operation_state_->acquire();
-    }
-  }
   auto status = qzCompressStream(session_, &stream_, last);
-  if (operation_state_ != nullptr) {
-    operation_state_->release();
-  }
   // NOTE: stream_.in_sz and stream_.out_sz have changed their semantics after the call
   //       to qzCompressStream(). Despite their name the new values are consumed input
   //       and produced output (not available buffer sizes).

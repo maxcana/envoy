@@ -12,6 +12,7 @@
 #include "source/common/common/logger.h"
 #include "source/common/common/thread.h"
 
+#include "contrib/qat/common/canary_controller.h"
 #include "contrib/qat/private_key_providers/source/libqat.h"
 #include "openssl/err.h"
 #include "openssl/rand.h"
@@ -36,15 +37,17 @@ enum class QatOperationResult { Success, Busy, Failure };
 
 class QatRsaOperationState {
 public:
-  explicit QatRsaOperationState(uint32_t target_concurrent_operations)
-      : target_concurrent_operations_(target_concurrent_operations) {}
+  explicit QatRsaOperationState(
+      const ::Envoy::Extensions::Qat::CanaryControllerSharedPtr& canary_controller)
+      : canary_controller_(canary_controller) {}
 
-  bool tryAcquire();
-  void release();
+  bool shouldUseQat() {
+    const auto controller = canary_controller_.lock();
+    return controller != nullptr && controller->shouldUseQat();
+  }
 
 private:
-  const uint32_t target_concurrent_operations_;
-  std::atomic<uint32_t> active_operations_{0};
+  std::weak_ptr<::Envoy::Extensions::Qat::CanaryController> canary_controller_;
 };
 
 using QatRsaOperationStateSharedPtr = std::shared_ptr<QatRsaOperationState>;
@@ -114,10 +117,16 @@ public:
   static int contextIndex();
 
   bool checkQatDevice();
+  ::Envoy::Extensions::Qat::CanaryControllerSharedPtr getOrCreateCanaryController(
+      Thread::ThreadFactory& thread_factory,
+      ::Envoy::Extensions::Qat::CanaryControllerConfig config,
+      ::Envoy::Extensions::Qat::CanaryController::MeasureCallback measure_callback);
 
 private:
   LibQatCryptoSharedPtr libqat_;
   bool qat_is_supported_{true};
+  Thread::MutexBasicLockable canary_lock_;
+  ::Envoy::Extensions::Qat::CanaryControllerSharedPtr canary_controller_;
 };
 
 /**
@@ -125,7 +134,7 @@ private:
  */
 class QatContext {
 public:
-  QatContext(QatHandle& handle, QatRsaOperationStateSharedPtr operation_state = nullptr);
+  QatContext(QatHandle& handle, bool return_on_retry = false);
   ~QatContext();
   bool init();
   QatHandle& getHandle();
@@ -136,7 +145,6 @@ public:
   CpaStatus getOpStatus();
   int getFd();
   int getWriteFd();
-  void completeOperation();
   QatOperationResult decrypt(int len, const unsigned char* from, RSA* rsa, int padding);
   void freeDecryptOpBuf(CpaCyRsaDecryptOpData* dec_op_data, CpaFlatBuffer* out_buf);
   void freeNuma(void* ptr);
@@ -158,8 +166,7 @@ private:
   // Pipe for passing the message that the operation is completed.
   int read_fd_{-1};
   int write_fd_{-1};
-  QatRsaOperationStateSharedPtr operation_state_;
-  bool operation_reserved_{false};
+  const bool return_on_retry_;
 };
 
 } // namespace Qat
