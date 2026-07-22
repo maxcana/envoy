@@ -1,5 +1,6 @@
 #include "contrib/qat/private_key_providers/source/qat.h"
 
+#include <cerrno>
 #include <utility>
 
 #include "libqat.h"
@@ -478,6 +479,18 @@ bool QatContext::copyDecryptedData(unsigned char* bytes, int len) {
 int QatContext::getFd() { return read_fd_; }
 
 int QatContext::getWriteFd() { return write_fd_; };
+
+bool QatContext::waitForCompletion(CpaStatus& status) {
+  ssize_t bytes;
+  do {
+    bytes = read(read_fd_, &status, sizeof(status));
+  } while (bytes < 0 && errno == EINTR);
+
+  RELEASE_ASSERT(bytes == sizeof(status), "Failed to read QAT completion notification");
+
+  Thread::LockGuard lock(data_lock_);
+  return true;
+}
 
 } // namespace Qat
 } // namespace PrivateKeyMethodProvider

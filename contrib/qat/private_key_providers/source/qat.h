@@ -145,6 +145,7 @@ public:
   CpaStatus getOpStatus();
   int getFd();
   int getWriteFd();
+  bool waitForCompletion(CpaStatus& status);
   QatOperationResult decrypt(int len, const unsigned char* from, RSA* rsa, int padding);
   void freeDecryptOpBuf(CpaCyRsaDecryptOpData* dec_op_data, CpaFlatBuffer* out_buf);
   void freeNuma(void* ptr);

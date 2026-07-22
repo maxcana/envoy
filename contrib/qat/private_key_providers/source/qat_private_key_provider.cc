@@ -57,8 +57,7 @@ public:
     }
 
     CpaStatus status = CPA_STATUS_FAIL;
-    if (read(context.getFd(), &status, sizeof(status)) != sizeof(status) ||
-        status != CPA_STATUS_SUCCESS) {
+    if (!context.waitForCompletion(status) || status != CPA_STATUS_SUCCESS) {
       return std::nullopt;
     }
     const auto elapsed = std::chrono::steady_clock::now() - start;
