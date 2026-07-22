@@ -57,6 +57,14 @@ message Qatzip {
       // configured QATzip input-size threshold.
       google.protobuf.UInt32Value input_size = 6
           [(validate.rules).uint32 = {lte: 2097152 gte: 128}];
+
+      // Minimum latency threshold used to classify QAT as busy. This prevents normal sub-
+      // millisecond variation between QAT instances from triggering fallback. Defaults to
+      // ``0.001s``. Set to ``0s`` to disable the minimum.
+      google.protobuf.Duration min_critical_value = 7 [(validate.rules).duration = {
+        lt {seconds: 60}
+        gte {}
+      }];
     }
 
     // Enables fixed-work compression latency canaries and deterministic routing between QATzip and

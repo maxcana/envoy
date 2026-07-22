@@ -73,11 +73,13 @@ private:
     const envoy::extensions::private_key_providers::qat::v3alpha::QatPrivateKeyMethodConfig::
         CryptoMbFallback::Canary& canary) {
   return {
+      0,
       PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, startup_samples, DefaultStartupSamples),
       std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(
           canary, startup_sample_interval, DefaultStartupSampleIntervalMs)),
       std::chrono::milliseconds(
           PROTOBUF_GET_MS_OR_DEFAULT(canary, poll_interval, DefaultCanaryPollIntervalMs)),
+      0,
       PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, probability_decrease, DefaultProbabilityDecrease),
       PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, probability_increase, DefaultProbabilityIncrease),
   };

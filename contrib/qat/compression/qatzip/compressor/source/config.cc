@@ -23,9 +23,20 @@ namespace {
 constexpr uint32_t DefaultStartupSamples = 30;
 constexpr uint64_t DefaultStartupSampleIntervalMs = 10;
 constexpr uint64_t DefaultCanaryPollIntervalMs = 1000;
+constexpr uint64_t DefaultMinCriticalValueMs = 1;
 constexpr uint32_t DefaultCanaryInputSize = 64 * 1024;
 constexpr double DefaultProbabilityDecrease = 0.1;
 constexpr double DefaultProbabilityIncrease = 0.1;
+
+double minCriticalValueMs(
+    const envoy::extensions::compression::qatzip::compressor::v3alpha::Qatzip::GzipFallback::
+        Canary& canary) {
+  if (!canary.has_min_critical_value()) {
+    return DefaultMinCriticalValueMs;
+  }
+  return static_cast<double>(canary.min_critical_value().seconds()) * 1000.0 +
+         static_cast<double>(canary.min_critical_value().nanos()) / 1000000.0;
+}
 
 // Default qatzip chunk size.
 const uint32_t DefaultChunkSize = 4096;
@@ -141,11 +152,13 @@ private:
     const envoy::extensions::compression::qatzip::compressor::v3alpha::Qatzip::GzipFallback::
         Canary& canary) {
   return {
+      1,
       PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, startup_samples, DefaultStartupSamples),
       std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(
           canary, startup_sample_interval, DefaultStartupSampleIntervalMs)),
       std::chrono::milliseconds(
           PROTOBUF_GET_MS_OR_DEFAULT(canary, poll_interval, DefaultCanaryPollIntervalMs)),
+      minCriticalValueMs(canary),
       PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, probability_decrease, DefaultProbabilityDecrease),
       PROTOBUF_GET_WRAPPED_OR_DEFAULT(canary, probability_increase, DefaultProbabilityIncrease),
   };
@@ -235,9 +248,11 @@ void QatzipCompressorFactory::setQatProbabilityForTest(double probability) {
   if (canary_controller_ == nullptr) {
     canary_controller_ = std::make_shared<::Envoy::Extensions::Qat::CanaryController>(
         "test", ::Envoy::Extensions::Qat::CanaryControllerConfig{
+                    0,
                     DefaultStartupSamples,
                     std::chrono::milliseconds(DefaultStartupSampleIntervalMs),
                     std::chrono::milliseconds(DefaultCanaryPollIntervalMs),
+                    0,
                     DefaultProbabilityDecrease, DefaultProbabilityIncrease});
     operation_state_ = std::make_shared<QatzipOperationState>(canary_controller_);
   }

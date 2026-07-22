@@ -9,7 +9,8 @@ namespace Qat {
 namespace {
 
 CanaryControllerConfig testConfig() {
-  return {30, std::chrono::milliseconds(10), std::chrono::seconds(1), 0.1, 0.1};
+  return {0, 30, std::chrono::milliseconds(10), std::chrono::seconds(1),
+          0, 0.1, 0.1};
 }
 
 TEST(CanaryControllerTest, CalculatesConservativeCriticalLatency) {

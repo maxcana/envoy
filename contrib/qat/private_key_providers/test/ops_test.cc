@@ -84,7 +84,8 @@ Ssl::BoringSslPrivateKeyMethodSharedPtr makeFallbackMethod() {
 struct TestOperationState {
   explicit TestOperationState(double probability) {
     ::Envoy::Extensions::Qat::CanaryControllerConfig config{
-        30, std::chrono::milliseconds(10), std::chrono::seconds(1), 0.1, 0.1};
+        0, 30, std::chrono::milliseconds(10), std::chrono::seconds(1),
+        0, 0.1, 0.1};
     controller =
         std::make_shared<::Envoy::Extensions::Qat::CanaryController>("test", config);
     controller->setProbabilityForTest(probability);

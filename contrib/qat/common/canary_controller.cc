@@ -133,6 +133,17 @@ void CanaryController::updateProbability(bool busy, double latency_ms) {
 }
 
 void CanaryController::run() {
+  for (uint32_t sample = 0;
+       sample < config_.startup_warmup_samples && !stopping_.load(std::memory_order_acquire);
+       ++sample) {
+    if (!measure_callback_().has_value()) {
+      ENVOY_LOG(warn, "{} QAT startup warmup failed", engine_name_);
+    }
+    if (!waitFor(config_.startup_sample_interval)) {
+      return;
+    }
+  }
+
   std::vector<double> startup_latencies;
   startup_latencies.reserve(config_.startup_samples);
 
@@ -154,7 +165,8 @@ void CanaryController::run() {
     probability_units_.store(0, std::memory_order_relaxed);
     ENVOY_LOG(error, "{} QAT startup canaries all failed; qat_probability=0", engine_name_);
   } else {
-    critical_latency_ms_ = calculateCriticalLatency(startup_latencies);
+    critical_latency_ms_ =
+        std::max(calculateCriticalLatency(startup_latencies), config_.min_critical_latency_ms);
     probability_units_.store(ProbabilityScale, std::memory_order_relaxed);
     ENVOY_LOG(info, "{} QAT startup canary latencies_ms={} critical_ms={:.3f}", engine_name_,
               formatLatencies(startup_latencies), critical_latency_ms_);
@@ -168,7 +180,8 @@ void CanaryController::run() {
       continue;
     }
     if (critical_latency_ms_ == 0) {
-      critical_latency_ms_ = 2.0 * *latency_ms;
+      critical_latency_ms_ =
+          std::max(2.0 * *latency_ms, config_.min_critical_latency_ms);
     }
     updateProbability(*latency_ms > critical_latency_ms_, *latency_ms);
   }

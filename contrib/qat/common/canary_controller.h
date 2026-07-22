@@ -20,9 +20,11 @@ namespace Extensions {
 namespace Qat {
 
 struct CanaryControllerConfig {
+  uint32_t startup_warmup_samples;
   uint32_t startup_samples;
   std::chrono::milliseconds startup_sample_interval;
   std::chrono::milliseconds poll_interval;
+  double min_critical_latency_ms;
   double probability_decrease;
   double probability_increase;
 };
